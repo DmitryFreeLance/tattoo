@@ -5,6 +5,7 @@ public record PaymentRequest(
         long userId,
         PaymentProduct product,
         int amountRub,
+        String payerName,
         PaymentStatus status,
         long createdAtEpochSec,
         Long reviewedByAdminId,

@@ -8,5 +8,6 @@ public enum ConversationState {
     WAIT_FREE_PROMPT,
     WAIT_ADMIN_ID,
     WAIT_BONUS_TARGET,
-    WAIT_BONUS_AMOUNT
+    WAIT_BONUS_AMOUNT,
+    WAIT_PAYMENT_PAYER_NAME
 }

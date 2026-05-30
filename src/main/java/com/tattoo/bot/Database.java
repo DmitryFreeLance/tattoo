@@ -106,6 +106,7 @@ public class Database {
                       product_code TEXT NOT NULL,
                       product_title TEXT NOT NULL,
                       amount_rub INTEGER NOT NULL,
+                      payer_name TEXT,
                       status TEXT NOT NULL DEFAULT 'PENDING',
                       created_at_epoch INTEGER NOT NULL,
                       reviewed_by_admin INTEGER,
@@ -133,6 +134,11 @@ public class Database {
             // Migration for existing DBs created before bonus_tokens was added.
             try {
                 st.execute("ALTER TABLE users ADD COLUMN bonus_tokens INTEGER NOT NULL DEFAULT 0");
+            } catch (SQLException ignored) {
+                // Column already exists.
+            }
+            try {
+                st.execute("ALTER TABLE payment_requests ADD COLUMN payer_name TEXT");
             } catch (SQLException ignored) {
                 // Column already exists.
             }
@@ -343,7 +349,7 @@ public class Database {
 
     public Optional<PaymentRequest> findLatestPendingPayment(long userId) {
         String sql = """
-                SELECT id, user_id, product_code, product_title, amount_rub, status,
+                SELECT id, user_id, product_code, product_title, amount_rub, payer_name, status,
                        created_at_epoch, reviewed_by_admin, reviewed_at_epoch, admin_comment
                 FROM payment_requests
                 WHERE user_id = ? AND status = 'PENDING'
@@ -367,7 +373,7 @@ public class Database {
 
     public Optional<PaymentRequest> getPaymentRequest(long requestId) {
         String sql = """
-                SELECT id, user_id, product_code, product_title, amount_rub, status,
+                SELECT id, user_id, product_code, product_title, amount_rub, payer_name, status,
                        created_at_epoch, reviewed_by_admin, reviewed_at_epoch, admin_comment
                 FROM payment_requests
                 WHERE id = ?
@@ -388,7 +394,7 @@ public class Database {
         }
     }
 
-    public long createPaymentRequest(long userId, PaymentProduct product) {
+    public long createPaymentRequest(long userId, PaymentProduct product, String payerName) {
         if (product == null) {
             throw new IllegalArgumentException("product is required");
         }
@@ -399,8 +405,8 @@ public class Database {
                 ensureUserExists(conn, userId);
 
                 String insert = """
-                        INSERT INTO payment_requests(user_id, product_code, product_title, amount_rub, status, created_at_epoch)
-                        VALUES (?, ?, ?, ?, 'PENDING', ?)
+                        INSERT INTO payment_requests(user_id, product_code, product_title, amount_rub, payer_name, status, created_at_epoch)
+                        VALUES (?, ?, ?, ?, ?, 'PENDING', ?)
                         """;
 
                 try (PreparedStatement ps = conn.prepareStatement(insert)) {
@@ -408,7 +414,8 @@ public class Database {
                     ps.setString(2, product.code());
                     ps.setString(3, product.title());
                     ps.setInt(4, product.amountRub());
-                    ps.setLong(5, nowEpochSec());
+                    ps.setString(5, (payerName == null || payerName.isBlank()) ? null : payerName.trim());
+                    ps.setLong(6, nowEpochSec());
                     ps.executeUpdate();
                 }
 
@@ -727,7 +734,7 @@ public class Database {
 
     private Optional<PaymentRequest> getPaymentRequestForUpdate(Connection conn, long requestId) throws SQLException {
         String sql = """
-                SELECT id, user_id, product_code, product_title, amount_rub, status,
+                SELECT id, user_id, product_code, product_title, amount_rub, payer_name, status,
                        created_at_epoch, reviewed_by_admin, reviewed_at_epoch, admin_comment
                 FROM payment_requests
                 WHERE id = ?
@@ -770,6 +777,7 @@ public class Database {
                 rs.getLong("user_id"),
                 productOpt.get(),
                 rs.getInt("amount_rub"),
+                rs.getString("payer_name"),
                 status,
                 rs.getLong("created_at_epoch"),
                 reviewedByNullable,
@@ -826,13 +834,7 @@ public class Database {
     }
 
     private int getEffectiveDailyGrant(Connection conn, long userId, long nowEpochSec) throws SQLException {
-        Optional<UserSubscription> active = getActiveSubscription(conn, userId, nowEpochSec);
-        if (active.isEmpty()) {
-            return 0;
-        }
-        int base = getSettingInt(conn, DAILY_SUBSCRIBER_TOKENS_KEY, DEFAULT_DAILY_SUBSCRIBER_TOKENS);
-        int boostGenerations = getActiveBoostGenerationsPerDay(conn, userId, nowEpochSec);
-        return base + boostGenerations * TOKEN_COST_PER_GENERATION;
+        return getSettingInt(conn, DAILY_SUBSCRIBER_TOKENS_KEY, DEFAULT_DAILY_SUBSCRIBER_TOKENS);
     }
 
     private int getActiveBoostGenerationsPerDay(Connection conn, long userId, long nowEpochSec) throws SQLException {
@@ -942,12 +944,9 @@ public class Database {
                        u.first_name,
                        u.is_admin,
                        u.bonus_tokens,
-                       COALESCE(g.count, 0) as used_today,
-                       COALESCE(s.plan_code, '') as plan_code,
-                       COALESCE(s.ends_at_epoch, 0) as ends_at_epoch
+                       COALESCE(g.count, 0) as used_today
                 FROM users u
                 LEFT JOIN generation_usage g ON g.user_id = u.user_id AND g.day_msk = ?
-                LEFT JOIN subscriptions s ON s.user_id = u.user_id
                 ORDER BY u.created_at DESC
                 """;
 
@@ -960,18 +959,10 @@ public class Database {
                     int used = rs.getInt("used_today");
                     int bonus = Math.max(0, rs.getInt("bonus_tokens"));
 
-                    String planCode = rs.getString("plan_code");
-                    long endsAt = rs.getLong("ends_at_epoch");
-                    boolean activeSubscription = !planCode.isBlank() && endsAt > now;
-
                     int dailyGrant = getEffectiveDailyGrant(conn, rs.getLong("user_id"), now);
 
                     int dailyRemaining = Math.max(0, dailyGrant - used * TOKEN_COST_PER_GENERATION);
                     int total = dailyRemaining + bonus;
-
-                    String planLabel = activeSubscription
-                            ? SubscriptionPlan.fromCode(planCode).map(SubscriptionPlan::title).orElse("Активная подписка")
-                            : "нет";
 
                     result.add(new UserSummary(
                             rs.getLong("user_id"),
@@ -982,8 +973,8 @@ public class Database {
                             used,
                             dailyRemaining,
                             total,
-                            activeSubscription,
-                            planLabel
+                            false,
+                            "доступ через подписку на канал"
                     ));
                 }
             }

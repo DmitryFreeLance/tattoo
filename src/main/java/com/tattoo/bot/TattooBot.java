@@ -47,7 +47,7 @@ public class TattooBot extends TelegramLongPollingBot {
             .withZone(MOSCOW_ZONE);
 
     private static final String PAYMENT_CARD_NUMBER = "2200531114826215";
-    private static final String PAYMENT_BANK_NAME = "Т-Банк";
+    private static final String PAYMENT_BANK_NAME = "АкБарс";
 
     private static final int KIE_LOW_BALANCE_THRESHOLD = 100;
     private static final long KIE_ALERT_COOLDOWN_SEC = 3_600L;
@@ -67,7 +67,6 @@ public class TattooBot extends TelegramLongPollingBot {
     private static final String CB_ADMIN_KIE = "admin_kie";
     private static final String CB_ADMIN_KIE_REFRESH = "admin_kie_refresh";
 
-    private static final String CB_PAYWALL = "paywall";
     private static final String CB_BUY_SELECT_PREFIX = "buy_sel:";
     private static final String CB_BUY_PAID_PREFIX = "buy_paid:";
 
@@ -154,12 +153,7 @@ public class TattooBot extends TelegramLongPollingBot {
         if (CB_CHECK_SUB.equals(data)) {
             if (isSubscribed(userId)) {
                 database.clearSession(userId);
-                if (hasPaidAccess(userId)) {
-                    sendMainMenu(chatId, userId, buildWelcomeWithBalance(userId));
-                } else {
-                    sendPaywall(chatId, userId,
-                            "✅ Подписка на канал подтверждена. Следующий шаг — активировать тариф для доступа к функциям бота.");
-                }
+                sendMainMenu(chatId, userId, buildWelcomeWithBalance(userId));
             } else {
                 sendSubscriptionGate(chatId, "Пока не вижу подписку. Подпишитесь на канал и нажмите кнопку еще раз 👇");
             }
@@ -192,29 +186,16 @@ public class TattooBot extends TelegramLongPollingBot {
             return;
         }
 
-        if (CB_PAYWALL.equals(data) || CB_MENU_BUY.equals(data)
-                || data.startsWith(CB_BUY_SELECT_PREFIX)
-                || data.startsWith(CB_BUY_PAID_PREFIX)) {
-            if (CB_PAYWALL.equals(data)) {
-                sendPaywall(chatId, userId, null);
-                return;
-            }
-            if (CB_MENU_BUY.equals(data)) {
-                sendPurchaseMenu(chatId, userId, null);
-                return;
-            }
-            if (data.startsWith(CB_BUY_SELECT_PREFIX)) {
-                handleProductSelection(chatId, userId, data.substring(CB_BUY_SELECT_PREFIX.length()));
-                return;
-            }
-            if (data.startsWith(CB_BUY_PAID_PREFIX)) {
-                handlePaidConfirmation(chatId, userId, data.substring(CB_BUY_PAID_PREFIX.length()));
-                return;
-            }
+        if (CB_MENU_BUY.equals(data)) {
+            sendPurchaseMenu(chatId, userId, null);
+            return;
         }
-
-        boolean adminBypass = database.isAdmin(userId) && isAdminOnlyCallback(data);
-        if (!adminBypass && !ensurePaidAccess(userId, chatId)) {
+        if (data.startsWith(CB_BUY_SELECT_PREFIX)) {
+            handleProductSelection(chatId, userId, data.substring(CB_BUY_SELECT_PREFIX.length()));
+            return;
+        }
+        if (data.startsWith(CB_BUY_PAID_PREFIX)) {
+            handlePaidConfirmation(chatId, userId, data.substring(CB_BUY_PAID_PREFIX.length()));
             return;
         }
 
@@ -299,20 +280,9 @@ public class TattooBot extends TelegramLongPollingBot {
             }
             case CB_BACK_MENU, CB_CANCEL -> {
                 database.clearSession(userId);
-                if (hasPaidAccess(userId)) {
-                    sendMainMenu(chatId, userId, withBalance("Главное меню снова перед вами 👇", userId));
-                } else {
-                    sendPaywall(chatId, userId,
-                            "Для продолжения работы с ботом нужно активировать тариф. Выберите удобный вариант ниже 👇");
-                }
+                sendMainMenu(chatId, userId, withBalance("Главное меню снова перед вами 👇", userId));
             }
-            default -> {
-                if (hasPaidAccess(userId)) {
-                    sendMainMenu(chatId, userId, withBalance("Меню обновлено 👇", userId));
-                } else {
-                    sendPaywall(chatId, userId, null);
-                }
-            }
+            default -> sendMainMenu(chatId, userId, withBalance("Меню обновлено 👇", userId));
         }
     }
 
@@ -337,20 +307,11 @@ public class TattooBot extends TelegramLongPollingBot {
                 return;
             }
             database.clearSession(userId);
-            if (hasPaidAccess(userId)) {
-                sendMainMenu(chatId, userId, buildWelcomeWithBalance(userId));
-            } else {
-                sendPaywall(chatId, userId,
-                        "📌 Перед началом работы нужно активировать подписку. Ниже — доступные тарифы и инструкция по оплате.");
-            }
+            sendMainMenu(chatId, userId, buildWelcomeWithBalance(userId));
             return;
         }
 
         if (!ensureSubscribed(userId, chatId)) {
-            return;
-        }
-
-        if (!ensurePaidAccess(userId, chatId)) {
             return;
         }
 
@@ -376,6 +337,7 @@ public class TattooBot extends TelegramLongPollingBot {
             case WAIT_ADMIN_ID -> handleAdminAddInput(message, userId, chatId);
             case WAIT_BONUS_TARGET -> handleBonusTargetInput(message, userId, chatId);
             case WAIT_BONUS_AMOUNT -> handleBonusAmountInput(message, session, userId, chatId);
+            case WAIT_PAYMENT_PAYER_NAME -> handlePaymentPayerNameInput(message, session, userId, chatId);
             case IDLE -> {
                 if (message.hasPhoto() || (message.hasText() && !message.getText().startsWith("/"))) {
                     sendMainMenu(chatId, userId,
@@ -385,98 +347,18 @@ public class TattooBot extends TelegramLongPollingBot {
         }
     }
 
-    private boolean hasPaidAccess(long userId) {
-        return database.hasActiveSubscription(userId);
-    }
-
-    private boolean isAdminOnlyCallback(String data) {
-        return CB_MENU_ADMIN.equals(data)
-                || CB_ADMIN_USERS.equals(data)
-                || CB_ADMIN_ADD.equals(data)
-                || CB_ADMIN_GIVE_BALANCE.equals(data)
-                || CB_ADMIN_KIE.equals(data)
-                || CB_ADMIN_KIE_REFRESH.equals(data);
-    }
-
-    private boolean ensurePaidAccess(long userId, long chatId) {
-        if (hasPaidAccess(userId)) {
-            return true;
-        }
-        sendPaywall(chatId, userId,
-                "🔐 Для использования функций бота нужна активная подписка.\n"
-                        + "Подписка открывает ежедневный лимит генераций и доступ ко всем режимам обработки.");
-        return false;
-    }
-
-    private void sendPaywall(long chatId, long userId, String prefix) {
-        StringBuilder sb = new StringBuilder();
-        if (prefix != null && !prefix.isBlank()) {
-            sb.append(prefix).append("\n\n");
-        }
-
-        sb.append("💼 <b>Доступ к Tattoo Assistant</b>\n\n");
-        sb.append("После оплаты подписки вы получаете:\n");
-        sb.append("• полный доступ к режимам генерации\n");
-        sb.append("• ежедневный лимит: <b>10 генераций в день</b>\n");
-        sb.append("• обновление лимита каждый день по МСК\n\n");
-        sb.append("Тарифы:\n");
-        sb.append("• 🗓️ Недельная подписка — <b>199 ₽</b>\n");
-        sb.append("• 🗓️ Месячная подписка — <b>699 ₽</b>\n\n");
-        sb.append("Оплата: перевод на карту <b>").append(PAYMENT_CARD_NUMBER).append("</b> (")
-                .append(PAYMENT_BANK_NAME).append(").\n");
-        sb.append("После перевода нажмите «Я оплатил», заявка уйдет администратору на проверку.");
-
-        List<List<InlineKeyboardButton>> rows = new ArrayList<>();
-        rows.add(singleButtonRow(callbackButton("🗓️ Недельная — 199 ₽", CB_BUY_SELECT_PREFIX + PaymentProduct.SUB_WEEK.code())));
-        rows.add(singleButtonRow(callbackButton("🗓️ Месячная — 699 ₽", CB_BUY_SELECT_PREFIX + PaymentProduct.SUB_MONTH.code())));
-        rows.add(singleButtonRow(callbackButton("✅ Я подписался на канал", CB_CHECK_SUB)));
-
-        if (database.isAdmin(userId)) {
-            rows.add(singleButtonRow(callbackButton("🛠️ Админ-панель", CB_MENU_ADMIN)));
-        }
-
-        InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
-        markup.setKeyboard(rows);
-
-        sendMessage(chatId, sb.toString(), markup);
-    }
-
     private void sendPurchaseMenu(long chatId, long userId, String prefix) {
-        Optional<UserSubscription> activeSub = database.getActiveSubscription(userId);
-
         StringBuilder sb = new StringBuilder();
         if (prefix != null && !prefix.isBlank()) {
             sb.append(prefix).append("\n\n");
         }
 
-        sb.append("💳 <b>Тарифы и покупки</b>\n\n");
-        if (activeSub.isPresent()) {
-            UserSubscription sub = activeSub.get();
-            sb.append("Текущая подписка: <b>").append(sub.plan().title()).append("</b>\n");
-            sb.append("Действует до: <b>").append(formatEpoch(sub.endsAtEpochSec())).append("</b>\n\n");
-        } else {
-            sb.append("Сейчас активной подписки нет.\n\n");
-        }
-
-        sb.append("Выберите, что хотите купить:\n");
-        sb.append("• подписку (или продление)\n");
-        sb.append("• увеличение дневного лимита в рамках активной подписки\n");
-        sb.append("• разовый пакет генераций, который не сгорает\n");
+        sb.append("💳 <b>Покупка дополнительных генераций</b>\n\n");
+        sb.append("Базовый дневной лимит вы получаете бесплатно: <b>10 генераций в день</b> при активной подписке на канал.\n");
+        sb.append("Если нужно больше, можно купить разовый пакет: он начисляется как бонусные токены и <b>не сгорает</b> при ежедневном обновлении лимита.\n\n");
+        sb.append("Выберите пакет ниже:");
 
         List<List<InlineKeyboardButton>> rows = new ArrayList<>();
-        rows.add(singleButtonRow(callbackButton("🗓️ Подписка на неделю — 199 ₽", CB_BUY_SELECT_PREFIX + PaymentProduct.SUB_WEEK.code())));
-        rows.add(singleButtonRow(callbackButton("🗓️ Подписка на месяц — 699 ₽", CB_BUY_SELECT_PREFIX + PaymentProduct.SUB_MONTH.code())));
-
-        if (activeSub.isPresent() && activeSub.get().plan() == SubscriptionPlan.WEEKLY) {
-            rows.add(singleButtonRow(callbackButton("📈 +5/день до конца недели — 149 ₽", CB_BUY_SELECT_PREFIX + PaymentProduct.ADD_WEEK_5.code())));
-            rows.add(singleButtonRow(callbackButton("📈 +10/день до конца недели — 300 ₽", CB_BUY_SELECT_PREFIX + PaymentProduct.ADD_WEEK_10.code())));
-        }
-
-        if (activeSub.isPresent() && activeSub.get().plan() == SubscriptionPlan.MONTHLY) {
-            rows.add(singleButtonRow(callbackButton("📈 +5/день до конца месяца — 640 ₽", CB_BUY_SELECT_PREFIX + PaymentProduct.ADD_MONTH_5.code())));
-            rows.add(singleButtonRow(callbackButton("📈 +10/день до конца месяца — 1290 ₽", CB_BUY_SELECT_PREFIX + PaymentProduct.ADD_MONTH_10.code())));
-        }
-
         rows.add(singleButtonRow(callbackButton("🎟️ Разовый пакет 10 генераций — 39 ₽", CB_BUY_SELECT_PREFIX + PaymentProduct.PACK_10.code())));
         rows.add(singleButtonRow(callbackButton("🎟️ Разовый пакет 20 генераций — 99 ₽", CB_BUY_SELECT_PREFIX + PaymentProduct.PACK_20.code())));
         rows.add(singleButtonRow(callbackButton("⬅️ В главное меню", CB_BACK_MENU)));
@@ -490,7 +372,7 @@ public class TattooBot extends TelegramLongPollingBot {
     private void handleProductSelection(long chatId, long userId, String productCode) {
         Optional<PaymentProduct> productOpt = PaymentProduct.fromCode(productCode);
         if (productOpt.isEmpty()) {
-            sendPurchaseMenu(chatId, userId, "⚠️ Не удалось распознать выбранный тариф. Попробуйте снова.");
+            sendPurchaseMenu(chatId, userId, "⚠️ Не удалось распознать выбранный пакет. Попробуйте снова.");
             return;
         }
 
@@ -506,7 +388,7 @@ public class TattooBot extends TelegramLongPollingBot {
 
     private void sendPaymentInstructions(long chatId, PaymentProduct product) {
         StringBuilder sb = new StringBuilder();
-        sb.append("💰 <b>Оплата выбранного тарифа</b>\n\n");
+        sb.append("💰 <b>Оплата пакета генераций</b>\n\n");
         sb.append("Вы выбрали: <b>").append(safe(product.title())).append("</b>\n");
         sb.append("Стоимость: <b>").append(product.amountRub()).append(" ₽</b>\n\n");
 
@@ -514,20 +396,13 @@ public class TattooBot extends TelegramLongPollingBot {
         sb.append("• Банк: <b>").append(PAYMENT_BANK_NAME).append("</b>\n");
         sb.append("• Карта: <code>").append(PAYMENT_CARD_NUMBER).append("</code>\n\n");
 
-        sb.append("После перевода нажмите кнопку <b>«✅ Я оплатил»</b>.\n");
-        sb.append("Бот отправит заявку администратору на проверку. До подтверждения заявка будет в статусе <b>«на проверке»</b>.\n\n");
-
-        if (product.kind() == PaymentProduct.Kind.ONE_TIME_PACK) {
-            sb.append("ℹ️ Разовый пакет начисляется как дополнительные генерации и <b>не сгорает</b> при обновлении дневного лимита.");
-        } else if (product.kind() == PaymentProduct.Kind.DAILY_BOOST) {
-            sb.append("ℹ️ Этот тариф увеличивает дневной лимит только на период активной подходящей подписки.");
-        } else {
-            sb.append("ℹ️ Подписка открывает доступ ко всем функциям и дает дневной лимит 10 генераций в день.");
-        }
+        sb.append("После перевода нажмите кнопку <b>«✅ Я оплатил»</b>, затем укажите <b>имя отправителя</b> (кто переводил).\n");
+        sb.append("Заявка уйдет администратору на проверку и будет в статусе <b>«на проверке»</b> до подтверждения.\n\n");
+        sb.append("ℹ️ Пакет начисляется как дополнительные генерации и <b>не сгорает</b> при ежедневном обновлении лимита.");
 
         List<List<InlineKeyboardButton>> rows = new ArrayList<>();
         rows.add(singleButtonRow(callbackButton("✅ Я оплатил", CB_BUY_PAID_PREFIX + product.code())));
-        rows.add(singleButtonRow(callbackButton("⬅️ К выбору тарифов", CB_MENU_BUY)));
+        rows.add(singleButtonRow(callbackButton("⬅️ К выбору пакетов", CB_MENU_BUY)));
 
         InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
         markup.setKeyboard(rows);
@@ -538,7 +413,7 @@ public class TattooBot extends TelegramLongPollingBot {
     private void handlePaidConfirmation(long chatId, long userId, String productCode) {
         Optional<PaymentProduct> productOpt = PaymentProduct.fromCode(productCode);
         if (productOpt.isEmpty()) {
-            sendPurchaseMenu(chatId, userId, "⚠️ Не удалось распознать тариф для подтверждения оплаты.");
+            sendPurchaseMenu(chatId, userId, "⚠️ Не удалось распознать пакет для подтверждения оплаты.");
             return;
         }
 
@@ -558,20 +433,72 @@ public class TattooBot extends TelegramLongPollingBot {
             return;
         }
 
-        long requestId = database.createPaymentRequest(userId, product);
-        notifyAdminsAboutPayment(userId, product, requestId);
+        sendMessage(chatId,
+                "✍️ Отлично, почти готово.\n\n"
+                        + "Пришлите <b>имя отправителя перевода</b> (как в банковском приложении), "
+                        + "чтобы администратор быстрее сверил оплату.\n\n"
+                        + "Пример: <code>Иван П.</code>",
+                keyboardWithCancel());
+        database.setSession(userId, ConversationState.WAIT_PAYMENT_PAYER_NAME, product.code());
+    }
+
+    private void handlePaymentPayerNameInput(Message message, SessionData session, long userId, long chatId) {
+        String productCode = session.pendingPhotoFileId();
+        Optional<PaymentProduct> productOpt = PaymentProduct.fromCode(productCode);
+        if (productOpt.isEmpty()) {
+            database.clearSession(userId);
+            sendPurchaseMenu(chatId, userId, "⚠️ Сессия оплаты устарела. Выберите пакет заново.");
+            return;
+        }
+
+        if (!message.hasText()) {
+            sendMessage(chatId,
+                    "Укажите имя отправителя текстом. Например: <code>Иван П.</code>",
+                    keyboardWithCancel());
+            return;
+        }
+
+        String payerName = message.getText().trim().replaceAll("\\s+", " ");
+        if (payerName.isBlank()) {
+            sendMessage(chatId,
+                    "Имя отправителя пустое. Пришлите, пожалуйста, имя, с которого выполнен перевод.",
+                    keyboardWithCancel());
+            return;
+        }
+        if (payerName.length() > 80) {
+            sendMessage(chatId,
+                    "Имя получилось слишком длинным. Используйте формат до 80 символов.",
+                    keyboardWithCancel());
+            return;
+        }
+
+        Optional<PaymentRequest> pending = database.findLatestPendingPayment(userId);
+        if (pending.isPresent()) {
+            database.clearSession(userId);
+            sendMessage(chatId,
+                    "🕒 У вас уже есть заявка на проверке (ID: <code>#" + pending.get().id() + "</code>).\n"
+                            + "Дождитесь решения администратора или свяжитесь с ним.",
+                    backToMenuKeyboard());
+            return;
+        }
+
+        PaymentProduct product = productOpt.get();
+        long requestId = database.createPaymentRequest(userId, product, payerName);
+        database.clearSession(userId);
+        notifyAdminsAboutPayment(userId, product, requestId, payerName);
 
         sendMessage(chatId,
                 "✅ <b>Заявка на оплату принята</b>\n\n"
                         + "ID заявки: <code>#" + requestId + "</code>\n"
-                        + "Тариф: <b>" + safe(product.title()) + "</b>\n"
-                        + "Сумма: <b>" + product.amountRub() + " ₽</b>\n\n"
+                        + "Пакет: <b>" + safe(product.title()) + "</b>\n"
+                        + "Сумма: <b>" + product.amountRub() + " ₽</b>\n"
+                        + "Имя отправителя: <b>" + safe(payerName) + "</b>\n\n"
                         + "Статус: <b>на проверке администратора</b>.\n"
-                        + "Как только администратор подтвердит платеж, бот автоматически начислит доступ/генерации.",
+                        + "После подтверждения бонусные генерации автоматически начислятся на ваш баланс.",
                 backToMenuKeyboard());
     }
 
-    private void notifyAdminsAboutPayment(long userId, PaymentProduct product, long requestId) {
+    private void notifyAdminsAboutPayment(long userId, PaymentProduct product, long requestId, String payerName) {
         List<Long> adminIds = database.listAdminIds();
         if (adminIds.isEmpty()) {
             log.warn("Нет админов для уведомления о платеже #{}", requestId);
@@ -582,7 +509,8 @@ public class TattooBot extends TelegramLongPollingBot {
                 + "ID: <code>#" + requestId + "</code>\n"
                 + "Пользователь: <code>" + userId + "</code>\n"
                 + "Продукт: <b>" + safe(product.title()) + "</b>\n"
-                + "Сумма: <b>" + product.amountRub() + " ₽</b>\n\n"
+                + "Сумма: <b>" + product.amountRub() + " ₽</b>\n"
+                + "Отправитель: <b>" + safe(payerName) + "</b>\n\n"
                 + "Проверьте перевод и примите решение:";
 
         List<List<InlineKeyboardButton>> rows = new ArrayList<>();
@@ -617,7 +545,7 @@ public class TattooBot extends TelegramLongPollingBot {
         sendMessage(request.userId(),
                 "✅ <b>Оплата подтверждена</b>\n\n"
                         + "Заявка: <code>#" + request.id() + "</code>\n"
-                        + "Тариф: <b>" + safe(request.product().title()) + "</b>\n"
+                        + "Пакет: <b>" + safe(request.product().title()) + "</b>\n"
                         + (result.grantedTokens() > 0
                         ? "Начислено: <b>" + result.grantedTokens() + " токенов</b>.\n"
                         : "")
@@ -662,14 +590,8 @@ public class TattooBot extends TelegramLongPollingBot {
     }
 
     private Optional<String> validateProductForUser(long userId, PaymentProduct product) {
-        if (product.kind() == PaymentProduct.Kind.DAILY_BOOST) {
-            Optional<UserSubscription> activeSub = database.getActiveSubscription(userId);
-            if (activeSub.isEmpty()) {
-                return Optional.of("увеличение дневного лимита доступно только при активной подписке");
-            }
-            if (activeSub.get().plan() != product.requiredPlan()) {
-                return Optional.of("этот тариф подходит только для «" + product.requiredPlan().title() + "»");
-            }
+        if (product.kind() != PaymentProduct.Kind.ONE_TIME_PACK) {
+            return Optional.of("сейчас доступны только разовые пакеты генераций");
         }
         return Optional.empty();
     }
@@ -754,7 +676,7 @@ public class TattooBot extends TelegramLongPollingBot {
                             + balance.availableGenerations() + " ген.)\n"
                             + "Дневной лимит: <b>" + (balance.dailyGrantTokens() / Math.max(1, balance.tokenCostPerGeneration())) + " генераций</b>\n"
                             + "Стоимость 1 генерации: <b>" + balance.tokenCostPerGeneration() + " токена</b>\n\n"
-                            + "Вы можете купить дополнительные генерации в разделе <b>«Купить/продлить»</b>.",
+                            + "Вы можете купить дополнительные генерации в разделе <b>«Купить токены»</b>.",
                     buyOrBackKeyboard());
             return false;
         }
@@ -989,7 +911,7 @@ public class TattooBot extends TelegramLongPollingBot {
         int tokenCost = database.getTokenCostPerGeneration();
 
         String header = "👥 <b>Список пользователей</b>\n"
-                + "Дневной лимит по подписке: <b>" + (dailyGrant / Math.max(1, tokenCost)) + " генераций</b>\n"
+                + "Базовый дневной лимит: <b>" + (dailyGrant / Math.max(1, tokenCost)) + " генераций</b>\n"
                 + "Списание за генерацию: <b>" + tokenCost + " токена</b>\n\n";
 
         List<String> chunks = new ArrayList<>();
@@ -1006,8 +928,7 @@ public class TattooBot extends TelegramLongPollingBot {
             }
             entry.append("\n");
             entry.append("  🔐 ").append(u.admin() ? "админ" : "пользователь").append("\n");
-            entry.append("  📦 подписка: ").append(u.hasActiveSubscription() ? "активна" : "нет")
-                    .append(" (").append(safe(u.subscriptionLabel())).append(")\n");
+            entry.append("  📢 доступ: по подписке на канал (проверка при каждом входе)\n");
             entry.append("  🎁 бонус: ").append(u.bonusTokens()).append(" токенов (")
                     .append(u.bonusTokens() / Math.max(1, tokenCost)).append(" доп. ген.)\n");
             entry.append("  📈 сегодня: ").append(u.usedTodayGenerations()).append(" генераций\n");
@@ -1036,7 +957,7 @@ public class TattooBot extends TelegramLongPollingBot {
         List<List<InlineKeyboardButton>> rows = new ArrayList<>();
         rows.add(singleButtonRow(callbackButton("🖼️ Трансферный рисунок", CB_MENU_TRANSFER)));
         rows.add(singleButtonRow(callbackButton("🧠 Свободная генерация", CB_MENU_FREE)));
-        rows.add(singleButtonRow(callbackButton("💳 Купить / продлить", CB_MENU_BUY)));
+        rows.add(singleButtonRow(callbackButton("💳 Купить токены", CB_MENU_BUY)));
         if (admin) {
             rows.add(singleButtonRow(callbackButton("🛠️ Админ-панель", CB_MENU_ADMIN)));
         }
@@ -1135,7 +1056,7 @@ public class TattooBot extends TelegramLongPollingBot {
 
     private InlineKeyboardMarkup buyOrBackKeyboard() {
         List<List<InlineKeyboardButton>> rows = new ArrayList<>();
-        rows.add(singleButtonRow(callbackButton("💳 Купить / продлить", CB_MENU_BUY)));
+        rows.add(singleButtonRow(callbackButton("💳 Купить токены", CB_MENU_BUY)));
         rows.add(singleButtonRow(callbackButton("⬅️ В главное меню", CB_BACK_MENU)));
 
         InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
@@ -1327,21 +1248,14 @@ public class TattooBot extends TelegramLongPollingBot {
 
     private String withBalance(String text, long userId) {
         UserBalanceInfo balance = database.getUserBalance(userId);
-        Optional<UserSubscription> subscriptionOpt = database.getActiveSubscription(userId);
 
         StringBuilder sb = new StringBuilder();
         sb.append(text).append("\n\n");
 
-        if (subscriptionOpt.isPresent()) {
-            UserSubscription sub = subscriptionOpt.get();
-            sb.append("📦 <b>Подписка:</b> ").append(sub.plan().title()).append("\n");
-            sb.append("⏳ <b>Действует до:</b> ").append(formatEpoch(sub.endsAtEpochSec())).append("\n");
-        } else if (database.isAdmin(userId)) {
-            sb.append("📦 <b>Подписка:</b> админ-доступ (без ограничений для управления)\n");
-        } else {
-            sb.append("📦 <b>Подписка:</b> не активна\n");
-        }
-
+        sb.append("📢 <b>Доступ:</b> при активной подписке на канал\n");
+        sb.append("📊 <b>Ежедневно (МСК):</b> ")
+                .append(balance.dailyGrantTokens() / Math.max(1, balance.tokenCostPerGeneration()))
+                .append(" генераций\n");
         sb.append("💰 <b>Ваш баланс:</b> ").append(balance.totalTokens()).append(" токенов (")
                 .append(balance.availableGenerations()).append(" ген.)");
 
