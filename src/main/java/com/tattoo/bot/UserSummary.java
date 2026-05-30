@@ -8,6 +8,8 @@ public record UserSummary(
         int bonusTokens,
         int usedTodayGenerations,
         int dailyRemainingTokens,
-        int totalTokens
+        int totalTokens,
+        boolean hasActiveSubscription,
+        String subscriptionLabel
 ) {
 }
