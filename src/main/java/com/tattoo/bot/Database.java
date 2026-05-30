@@ -23,10 +23,8 @@ public class Database {
     private static final ZoneId MOSCOW_ZONE = ZoneId.of("Europe/Moscow");
 
     private static final String DAILY_SUBSCRIBER_TOKENS_KEY = "daily_subscriber_tokens";
-    private static final String KIE_INTERNAL_BALANCE_KEY = "kie_internal_balance";
 
     private static final int DEFAULT_DAILY_SUBSCRIBER_TOKENS = 40;
-    private static final int DEFAULT_KIE_INTERNAL_BALANCE = 0;
     private static final int TOKEN_COST_PER_GENERATION = 4;
 
     private final String jdbcUrl;
@@ -97,7 +95,6 @@ public class Database {
             }
 
             upsertSetting(conn, DAILY_SUBSCRIBER_TOKENS_KEY, String.valueOf(DEFAULT_DAILY_SUBSCRIBER_TOKENS), false);
-            upsertSetting(conn, KIE_INTERNAL_BALANCE_KEY, String.valueOf(DEFAULT_KIE_INTERNAL_BALANCE), false);
         } catch (SQLException e) {
             throw new IllegalStateException("Ошибка инициализации БД", e);
         }
@@ -205,28 +202,6 @@ public class Database {
         }
     }
 
-    public int getKieInternalBalance() {
-        try (Connection conn = openConnection()) {
-            return getSettingInt(conn, KIE_INTERNAL_BALANCE_KEY, DEFAULT_KIE_INTERNAL_BALANCE);
-        } catch (SQLException e) {
-            log.error("Не удалось получить внутренний баланс KIE", e);
-            return DEFAULT_KIE_INTERNAL_BALANCE;
-        }
-    }
-
-    public void addKieInternalBalance(int tokens) {
-        if (tokens <= 0) {
-            return;
-        }
-        try (Connection conn = openConnection()) {
-            int current = getSettingInt(conn, KIE_INTERNAL_BALANCE_KEY, DEFAULT_KIE_INTERNAL_BALANCE);
-            int updated = Math.max(0, current + tokens);
-            upsertSetting(conn, KIE_INTERNAL_BALANCE_KEY, String.valueOf(updated), true);
-        } catch (SQLException e) {
-            throw new IllegalStateException("Не удалось изменить внутренний баланс KIE", e);
-        }
-    }
-
     public void addUserBonusTokens(long userId, int tokens) {
         if (tokens <= 0) {
             return;
@@ -297,7 +272,6 @@ public class Database {
                 int dailyGrant = getSettingInt(conn, DAILY_SUBSCRIBER_TOKENS_KEY, DEFAULT_DAILY_SUBSCRIBER_TOKENS);
                 int usedToday = getUsageByDate(conn, userId, day);
                 int bonus = getUserBonusTokens(conn, userId);
-                int kieBalance = getSettingInt(conn, KIE_INTERNAL_BALANCE_KEY, DEFAULT_KIE_INTERNAL_BALANCE);
 
                 int dailyRemaining = Math.max(0, dailyGrant - usedToday * TOKEN_COST_PER_GENERATION);
                 int totalUserTokens = dailyRemaining + bonus;
@@ -313,12 +287,7 @@ public class Database {
 
                 if (totalUserTokens < TOKEN_COST_PER_GENERATION) {
                     conn.rollback();
-                    return new ConsumeResult(ConsumeStatus.USER_BALANCE_LOW, before, kieBalance);
-                }
-
-                if (kieBalance < TOKEN_COST_PER_GENERATION) {
-                    conn.rollback();
-                    return new ConsumeResult(ConsumeStatus.KIE_BALANCE_LOW, before, kieBalance);
+                    return new ConsumeResult(ConsumeStatus.USER_BALANCE_LOW, before);
                 }
 
                 int spendFromDaily = Math.min(dailyRemaining, TOKEN_COST_PER_GENERATION);
@@ -334,13 +303,11 @@ public class Database {
                 }
 
                 upsertUsage(conn, userId, day, usedToday + 1);
-                upsertSetting(conn, KIE_INTERNAL_BALANCE_KEY, String.valueOf(kieBalance - TOKEN_COST_PER_GENERATION), true);
 
                 int usedAfter = usedToday + 1;
                 int bonusAfter = Math.max(0, bonus - spendFromBonus);
                 int dailyRemainingAfter = Math.max(0, dailyGrant - usedAfter * TOKEN_COST_PER_GENERATION);
                 int totalAfter = dailyRemainingAfter + bonusAfter;
-                int kieAfter = kieBalance - TOKEN_COST_PER_GENERATION;
 
                 UserBalanceInfo after = new UserBalanceInfo(
                         dailyGrant,
@@ -352,7 +319,7 @@ public class Database {
                 );
 
                 conn.commit();
-                return new ConsumeResult(ConsumeStatus.SUCCESS, after, kieAfter);
+                return new ConsumeResult(ConsumeStatus.SUCCESS, after);
             } catch (Exception inner) {
                 conn.rollback();
                 throw inner;
@@ -361,7 +328,7 @@ public class Database {
             }
         } catch (Exception e) {
             log.error("Не удалось списать токены генерации пользователя {}", userId, e);
-            return new ConsumeResult(ConsumeStatus.ERROR, getUserBalance(userId), getKieInternalBalance());
+            return new ConsumeResult(ConsumeStatus.ERROR, getUserBalance(userId));
         }
     }
 

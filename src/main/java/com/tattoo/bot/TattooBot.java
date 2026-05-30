@@ -50,7 +50,6 @@ public class TattooBot extends TelegramLongPollingBot {
     private static final String CB_ADMIN_ADD = "admin_add";
     private static final String CB_ADMIN_GIVE_BALANCE = "admin_give_balance";
     private static final String CB_ADMIN_KIE = "admin_kie";
-    private static final String CB_ADMIN_KIE_ADD = "admin_kie_add_1000";
     private static final String CB_ADMIN_KIE_REFRESH = "admin_kie_refresh";
 
     private static final String CB_BACK_MENU = "back_menu";
@@ -205,22 +204,14 @@ public class TattooBot extends TelegramLongPollingBot {
                     sendMessage(chatId, "⛔️ Недостаточно прав.", backToMenuKeyboard());
                     return;
                 }
-                sendKieAccounting(chatId, null);
-            }
-            case CB_ADMIN_KIE_ADD -> {
-                if (!database.isAdmin(userId)) {
-                    sendMessage(chatId, "⛔️ Недостаточно прав.", backToMenuKeyboard());
-                    return;
-                }
-                database.addKieInternalBalance(1000);
-                sendKieAccounting(chatId, "✅ Добавлено <b>+1000</b> токенов во внутренний баланс KIE.");
+                sendKieAccounting(chatId);
             }
             case CB_ADMIN_KIE_REFRESH -> {
                 if (!database.isAdmin(userId)) {
                     sendMessage(chatId, "⛔️ Недостаточно прав.", backToMenuKeyboard());
                     return;
                 }
-                sendKieAccounting(chatId, null);
+                sendKieAccounting(chatId);
             }
             case CB_BACK_MENU, CB_CANCEL -> {
                 database.clearSession(userId);
@@ -383,14 +374,6 @@ public class TattooBot extends TelegramLongPollingBot {
                             + "Ежедневно активному подписчику начисляется <b>"
                             + balance.dailyGrantTokens() + " токенов</b>.\n"
                             + "Стоимость 1 генерации: <b>" + balance.tokenCostPerGeneration() + " токена</b>.",
-                    backToMenuKeyboard());
-            return false;
-        }
-
-        if (result.status() == ConsumeStatus.KIE_BALANCE_LOW) {
-            sendMessage(chatId,
-                    "🏦 <b>Внутренний баланс KIE сейчас исчерпан</b>\n\n"
-                            + "Попросите администратора пополнить баланс в админ-панели.",
                     backToMenuKeyboard());
             return false;
         }
@@ -676,8 +659,6 @@ public class TattooBot extends TelegramLongPollingBot {
     }
 
     private void sendAdminPanel(long chatId) {
-        int kieInternal = database.getKieInternalBalance();
-
         List<List<InlineKeyboardButton>> rows = new ArrayList<>();
         rows.add(singleButtonRow(callbackButton("👥 Список пользователей", CB_ADMIN_USERS)));
         rows.add(singleButtonRow(callbackButton("➕ Добавить админа", CB_ADMIN_ADD)));
@@ -690,28 +671,20 @@ public class TattooBot extends TelegramLongPollingBot {
 
         sendMessage(chatId,
                 "🛠️ <b>Админ-панель</b>\n\n"
-                        + "Текущий внутренний баланс KIE: <b>" + kieInternal + " токенов</b>\n"
                         + "Выберите действие:",
                 markup);
     }
 
-    private void sendKieAccounting(long chatId, String prefix) {
+    private void sendKieAccounting(long chatId) {
         Integer remoteCredits = kieAiClient.getRemainingCredits();
-        int internal = database.getKieInternalBalance();
         int cost = database.getTokenCostPerGeneration();
 
         StringBuilder sb = new StringBuilder();
-        if (prefix != null && !prefix.isBlank()) {
-            sb.append(prefix).append("\n\n");
-        }
-
         sb.append("🏦 <b>Учет баланса KIE</b>\n\n");
-        sb.append("• Внутренний баланс бота: <b>").append(internal).append(" токенов</b>\n");
         sb.append("• Баланс по API KIE: <b>").append(remoteCredits == null ? "недоступно" : remoteCredits).append("</b>\n");
         sb.append("• Списание за 1 генерацию: <b>").append(cost).append(" токена</b>\n");
 
         List<List<InlineKeyboardButton>> rows = new ArrayList<>();
-        rows.add(singleButtonRow(callbackButton("➕ +1000 токенов KIE", CB_ADMIN_KIE_ADD)));
         rows.add(singleButtonRow(callbackButton("🔄 Обновить", CB_ADMIN_KIE_REFRESH)));
         rows.add(singleButtonRow(callbackButton("⬅️ В админ-панель", CB_MENU_ADMIN)));
 
