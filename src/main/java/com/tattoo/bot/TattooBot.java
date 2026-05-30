@@ -50,7 +50,6 @@ public class TattooBot extends TelegramLongPollingBot {
     private static final String PAYMENT_BANK_NAME = "АкБарс";
 
     private static final int KIE_LOW_BALANCE_THRESHOLD = 100;
-    private static final long KIE_ALERT_COOLDOWN_SEC = 3_600L;
 
     private static final String CB_CHECK_SUB = "sub_check";
 
@@ -93,7 +92,7 @@ public class TattooBot extends TelegramLongPollingBot {
     private final HttpClient httpClient;
     private final ExecutorService generationPool;
 
-    private volatile long lastLowKieAlertAtEpochSec = 0L;
+    private volatile boolean lowKieAlertSent = false;
 
     public TattooBot(AppConfig config, Database database, KieAiClient kieAiClient) {
         super(config.getBotToken());
@@ -1024,16 +1023,20 @@ public class TattooBot extends TelegramLongPollingBot {
     }
 
     private void maybeNotifyAdminsLowKie(Integer credits) {
-        if (credits == null || credits >= KIE_LOW_BALANCE_THRESHOLD) {
+        if (credits == null) {
             return;
         }
 
-        long now = Instant.now().getEpochSecond();
-        if (now - lastLowKieAlertAtEpochSec < KIE_ALERT_COOLDOWN_SEC) {
+        if (credits >= KIE_LOW_BALANCE_THRESHOLD) {
+            lowKieAlertSent = false;
             return;
         }
 
-        lastLowKieAlertAtEpochSec = now;
+        if (lowKieAlertSent) {
+            return;
+        }
+
+        lowKieAlertSent = true;
 
         String alert = "⚠️ <b>Предупреждение по KIE</b>\n\n"
                 + "Текущий баланс KIE API: <b>" + credits + "</b>\n"
