@@ -7,5 +7,6 @@ public enum ConversationState {
     WAIT_FREE_INPUT,
     WAIT_FREE_PROMPT,
     WAIT_ADMIN_ID,
-    WAIT_DAILY_LIMIT
+    WAIT_BONUS_TARGET,
+    WAIT_BONUS_AMOUNT
 }

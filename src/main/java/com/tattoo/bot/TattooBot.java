@@ -3,8 +3,8 @@ package com.tattoo.bot;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.telegram.telegrambots.bots.TelegramLongPollingBot;
-import org.telegram.telegrambots.meta.api.methods.AnswerCallbackQuery;
 import org.telegram.telegrambots.meta.api.methods.ActionType;
+import org.telegram.telegrambots.meta.api.methods.AnswerCallbackQuery;
 import org.telegram.telegrambots.meta.api.methods.GetFile;
 import org.telegram.telegrambots.meta.api.methods.groupadministration.CreateChatInviteLink;
 import org.telegram.telegrambots.meta.api.methods.groupadministration.ExportChatInviteLink;
@@ -12,8 +12,9 @@ import org.telegram.telegrambots.meta.api.methods.groupadministration.GetChatMem
 import org.telegram.telegrambots.meta.api.methods.send.SendChatAction;
 import org.telegram.telegrambots.meta.api.methods.send.SendMessage;
 import org.telegram.telegrambots.meta.api.methods.send.SendPhoto;
-import org.telegram.telegrambots.meta.api.objects.ChatInviteLink;
 import org.telegram.telegrambots.meta.api.objects.CallbackQuery;
+import org.telegram.telegrambots.meta.api.objects.ChatInviteLink;
+import org.telegram.telegrambots.meta.api.objects.InputFile;
 import org.telegram.telegrambots.meta.api.objects.Message;
 import org.telegram.telegrambots.meta.api.objects.PhotoSize;
 import org.telegram.telegrambots.meta.api.objects.Update;
@@ -21,14 +22,12 @@ import org.telegram.telegrambots.meta.api.objects.User;
 import org.telegram.telegrambots.meta.api.objects.chatmember.ChatMember;
 import org.telegram.telegrambots.meta.api.objects.replykeyboard.InlineKeyboardMarkup;
 import org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton;
-import org.telegram.telegrambots.meta.api.objects.InputFile;
 import org.telegram.telegrambots.meta.exceptions.TelegramApiException;
 
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
-import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -46,15 +45,20 @@ public class TattooBot extends TelegramLongPollingBot {
     private static final String CB_MENU_SKETCH = "menu_sketch";
     private static final String CB_MENU_FREE = "menu_free";
     private static final String CB_MENU_ADMIN = "menu_admin";
+
     private static final String CB_ADMIN_USERS = "admin_users";
     private static final String CB_ADMIN_ADD = "admin_add";
-    private static final String CB_ADMIN_LIMIT = "admin_limit";
-    private static final String CB_ADMIN_BACK = "admin_back";
+    private static final String CB_ADMIN_GIVE_BALANCE = "admin_give_balance";
+    private static final String CB_ADMIN_KIE = "admin_kie";
+    private static final String CB_ADMIN_KIE_ADD = "admin_kie_add_1000";
+    private static final String CB_ADMIN_KIE_REFRESH = "admin_kie_refresh";
+
     private static final String CB_BACK_MENU = "back_menu";
     private static final String CB_CANCEL = "cancel";
 
     private static final String PROMPT_TRANSFER = "Обработка изображения так, чтобы сделать из этого рисунка контурный линейный рисунок с обозначениями теней пунктиром контуров линиями разной толщины.";
     private static final String PROMPT_SKETCH = "Сделай из исходного фото чистый художественный тату-эскиз: выразительные контуры, логичные тени, аккуратная композиция для переноса на кожу, без лишнего фона и визуального мусора.";
+
     private static final String WELCOME_TEXT = "👋 <b>Добро пожаловать в Tattoo Assistant</b>\n\n"
             + "Я помогу быстро подготовить:\n"
             + "• 🖼️ трансферный рисунок\n"
@@ -119,7 +123,7 @@ public class TattooBot extends TelegramLongPollingBot {
         if (CB_CHECK_SUB.equals(data)) {
             if (isSubscribed(userId)) {
                 database.clearSession(userId);
-                sendMainMenu(chatId, userId, WELCOME_TEXT);
+                sendMainMenu(chatId, userId, buildWelcomeWithBalance(userId));
             } else {
                 sendSubscriptionGate(chatId, "Пока не вижу подписку. Подпишитесь на канал и нажмите кнопку еще раз 👇");
             }
@@ -185,23 +189,44 @@ public class TattooBot extends TelegramLongPollingBot {
                                 + "• @username (если пользователь уже писал боту).",
                         keyboardWithCancel());
             }
-            case CB_ADMIN_LIMIT -> {
+            case CB_ADMIN_GIVE_BALANCE -> {
                 if (!database.isAdmin(userId)) {
                     sendMessage(chatId, "⛔️ Недостаточно прав.", backToMenuKeyboard());
                     return;
                 }
-                database.setSession(userId, ConversationState.WAIT_DAILY_LIMIT, null);
+                database.setSession(userId, ConversationState.WAIT_BONUS_TARGET, null);
                 sendMessage(chatId,
-                        "📊 <b>Лимит генераций в день (МСК)</b>\n\n"
-                                + "Текущее значение: <b>" + database.getDefaultDailyLimit() + "</b>\n"
-                                + "Отправьте новое число (например <code>30</code>).",
+                        "💰 <b>Выдача баланса пользователю</b>\n\n"
+                                + "Пришлите ID пользователя или @username.",
                         keyboardWithCancel());
             }
-            case CB_ADMIN_BACK, CB_BACK_MENU, CB_CANCEL -> {
-                database.clearSession(userId);
-                sendMainMenu(chatId, userId, "Главное меню снова перед вами 👇");
+            case CB_ADMIN_KIE -> {
+                if (!database.isAdmin(userId)) {
+                    sendMessage(chatId, "⛔️ Недостаточно прав.", backToMenuKeyboard());
+                    return;
+                }
+                sendKieAccounting(chatId, null);
             }
-            default -> sendMainMenu(chatId, userId, "Меню обновлено 👇");
+            case CB_ADMIN_KIE_ADD -> {
+                if (!database.isAdmin(userId)) {
+                    sendMessage(chatId, "⛔️ Недостаточно прав.", backToMenuKeyboard());
+                    return;
+                }
+                database.addKieInternalBalance(1000);
+                sendKieAccounting(chatId, "✅ Добавлено <b>+1000</b> токенов во внутренний баланс KIE.");
+            }
+            case CB_ADMIN_KIE_REFRESH -> {
+                if (!database.isAdmin(userId)) {
+                    sendMessage(chatId, "⛔️ Недостаточно прав.", backToMenuKeyboard());
+                    return;
+                }
+                sendKieAccounting(chatId, null);
+            }
+            case CB_BACK_MENU, CB_CANCEL -> {
+                database.clearSession(userId);
+                sendMainMenu(chatId, userId, withBalance("Главное меню снова перед вами 👇", userId));
+            }
+            default -> sendMainMenu(chatId, userId, withBalance("Меню обновлено 👇", userId));
         }
     }
 
@@ -226,7 +251,7 @@ public class TattooBot extends TelegramLongPollingBot {
                 return;
             }
             database.clearSession(userId);
-            sendMainMenu(chatId, userId, WELCOME_TEXT);
+            sendMainMenu(chatId, userId, buildWelcomeWithBalance(userId));
             return;
         }
 
@@ -237,9 +262,11 @@ public class TattooBot extends TelegramLongPollingBot {
         SessionData session = database.getSession(userId);
 
         if (!database.isAdmin(userId)
-                && (session.state() == ConversationState.WAIT_ADMIN_ID || session.state() == ConversationState.WAIT_DAILY_LIMIT)) {
+                && (session.state() == ConversationState.WAIT_ADMIN_ID
+                || session.state() == ConversationState.WAIT_BONUS_TARGET
+                || session.state() == ConversationState.WAIT_BONUS_AMOUNT)) {
             database.clearSession(userId);
-            sendMainMenu(chatId, userId, "Сессия администратора закрыта. Возвращаю вас в меню.");
+            sendMainMenu(chatId, userId, withBalance("Сессия администратора закрыта. Возвращаю вас в меню.", userId));
             return;
         }
 
@@ -248,11 +275,12 @@ public class TattooBot extends TelegramLongPollingBot {
             case WAIT_SKETCH_PHOTO -> handleSketchInput(message, userId, chatId);
             case WAIT_FREE_INPUT, WAIT_FREE_PROMPT -> handleFreeInput(message, session, userId, chatId);
             case WAIT_ADMIN_ID -> handleAdminAddInput(message, userId, chatId);
-            case WAIT_DAILY_LIMIT -> handleDailyLimitInput(message, userId, chatId);
+            case WAIT_BONUS_TARGET -> handleBonusTargetInput(message, userId, chatId);
+            case WAIT_BONUS_AMOUNT -> handleBonusAmountInput(message, session, userId, chatId);
             case IDLE -> {
                 if (message.hasPhoto() || (message.hasText() && !message.getText().startsWith("/"))) {
                     sendMainMenu(chatId, userId,
-                            "Чтобы не потеряться в сценариях, выберите действие в меню ниже 👇");
+                            withBalance("Чтобы не потеряться в сценариях, выберите действие в меню ниже 👇", userId));
                 }
             }
         }
@@ -266,8 +294,7 @@ public class TattooBot extends TelegramLongPollingBot {
             return;
         }
 
-        if (!database.tryConsumeGeneration(userId)) {
-            sendDailyLimitReached(chatId, userId);
+        if (!consumeTokensOrNotify(chatId, userId)) {
             return;
         }
 
@@ -283,8 +310,7 @@ public class TattooBot extends TelegramLongPollingBot {
             return;
         }
 
-        if (!database.tryConsumeGeneration(userId)) {
-            sendDailyLimitReached(chatId, userId);
+        if (!consumeTokensOrNotify(chatId, userId)) {
             return;
         }
 
@@ -300,8 +326,7 @@ public class TattooBot extends TelegramLongPollingBot {
             String prompt = message.getCaption();
 
             if (prompt != null && !prompt.trim().isEmpty()) {
-                if (!database.tryConsumeGeneration(userId)) {
-                    sendDailyLimitReached(chatId, userId);
+                if (!consumeTokensOrNotify(chatId, userId)) {
                     return;
                 }
                 database.clearSession(userId);
@@ -327,8 +352,7 @@ public class TattooBot extends TelegramLongPollingBot {
                 return;
             }
 
-            if (!database.tryConsumeGeneration(userId)) {
-                sendDailyLimitReached(chatId, userId);
+            if (!consumeTokensOrNotify(chatId, userId)) {
                 return;
             }
 
@@ -343,6 +367,40 @@ public class TattooBot extends TelegramLongPollingBot {
                 keyboardWithCancel());
     }
 
+    private boolean consumeTokensOrNotify(long chatId, long userId) {
+        ConsumeResult result = database.tryConsumeGeneration(userId);
+
+        if (result.status() == ConsumeStatus.SUCCESS) {
+            return true;
+        }
+
+        if (result.status() == ConsumeStatus.USER_BALANCE_LOW) {
+            UserBalanceInfo balance = result.userBalance();
+            sendMessage(chatId,
+                    "💰 <b>Недостаточно баланса для генерации</b>\n\n"
+                            + "Ваш баланс: <b>" + balance.totalTokens() + " токенов</b> ("
+                            + balance.availableGenerations() + " ген.)\n"
+                            + "Ежедневно активному подписчику начисляется <b>"
+                            + balance.dailyGrantTokens() + " токенов</b>.\n"
+                            + "Стоимость 1 генерации: <b>" + balance.tokenCostPerGeneration() + " токена</b>.",
+                    backToMenuKeyboard());
+            return false;
+        }
+
+        if (result.status() == ConsumeStatus.KIE_BALANCE_LOW) {
+            sendMessage(chatId,
+                    "🏦 <b>Внутренний баланс KIE сейчас исчерпан</b>\n\n"
+                            + "Попросите администратора пополнить баланс в админ-панели.",
+                    backToMenuKeyboard());
+            return false;
+        }
+
+        sendMessage(chatId,
+                "⚠️ Не удалось проверить баланс. Попробуйте снова через пару секунд.",
+                backToMenuKeyboard());
+        return false;
+    }
+
     private void handleAdminAddInput(Message message, long adminUserId, long chatId) {
         if (!database.isAdmin(adminUserId)) {
             database.clearSession(adminUserId);
@@ -350,25 +408,14 @@ public class TattooBot extends TelegramLongPollingBot {
             return;
         }
 
-        Long targetId = null;
-        if (message.hasText()) {
-            String text = message.getText().trim();
-            if (text.matches("^-?\\d+$")) {
-                targetId = Long.parseLong(text);
-            } else if (text.startsWith("@")) {
-                Optional<Long> byUsername = database.findUserIdByUsername(text);
-                if (byUsername.isPresent()) {
-                    targetId = byUsername.get();
-                } else {
-                    sendMessage(chatId,
-                            "Пользователь с таким username пока не найден в базе."
-                                    + " Попросите его сначала написать боту /start.",
-                            keyboardWithCancel());
-                    return;
-                }
-            }
+        if (!message.hasText()) {
+            sendMessage(chatId,
+                    "Не удалось распознать ID. Пришлите число вида <code>123456789</code> или @username.",
+                    keyboardWithCancel());
+            return;
         }
 
+        Long targetId = resolveUserIdFromText(message.getText().trim());
         if (targetId == null) {
             sendMessage(chatId,
                     "Не удалось распознать ID. Пришлите число вида <code>123456789</code> или @username.",
@@ -383,7 +430,7 @@ public class TattooBot extends TelegramLongPollingBot {
                 adminBackKeyboard());
     }
 
-    private void handleDailyLimitInput(Message message, long adminUserId, long chatId) {
+    private void handleBonusTargetInput(Message message, long adminUserId, long chatId) {
         if (!database.isAdmin(adminUserId)) {
             database.clearSession(adminUserId);
             sendMessage(chatId, "⛔️ Недостаточно прав.", backToMenuKeyboard());
@@ -391,34 +438,73 @@ public class TattooBot extends TelegramLongPollingBot {
         }
 
         if (!message.hasText()) {
-            sendMessage(chatId, "Пришлите число, например <code>25</code>.", keyboardWithCancel());
-            return;
-        }
-
-        String text = message.getText().trim();
-        if (!text.matches("^\\d+$")) {
-            sendMessage(chatId, "Нужно положительное число. Например: <code>25</code>", keyboardWithCancel());
-            return;
-        }
-
-        int limit = Integer.parseInt(text);
-        if (limit < 1 || limit > 1000) {
             sendMessage(chatId,
-                    "Допустимый диапазон: от <b>1</b> до <b>1000</b>. Попробуйте еще раз.",
+                    "Пришлите ID пользователя или @username.",
                     keyboardWithCancel());
             return;
         }
 
-        database.setDefaultDailyLimit(limit);
-        database.clearSession(adminUserId);
+        String raw = message.getText().trim();
+        Long targetId = resolveUserIdFromText(raw);
+        if (targetId == null) {
+            sendMessage(chatId,
+                    "Пользователь не найден. Используйте ID или @username (если он уже писал боту).",
+                    keyboardWithCancel());
+            return;
+        }
+
+        database.setSession(adminUserId, ConversationState.WAIT_BONUS_AMOUNT, String.valueOf(targetId));
         sendMessage(chatId,
-                "✅ Новый дневной лимит (МСК) установлен: <b>" + limit + "</b>",
+                "💰 Пользователь: <code>" + targetId + "</code>\n"
+                        + "Теперь пришлите сумму токенов для начисления (например <code>40</code>).",
+                keyboardWithCancel());
+    }
+
+    private void handleBonusAmountInput(Message message, SessionData session, long adminUserId, long chatId) {
+        if (!database.isAdmin(adminUserId)) {
+            database.clearSession(adminUserId);
+            sendMessage(chatId, "⛔️ Недостаточно прав.", backToMenuKeyboard());
+            return;
+        }
+
+        String pendingTarget = session.pendingPhotoFileId();
+        if (pendingTarget == null || !pendingTarget.matches("^-?\\d+$")) {
+            database.clearSession(adminUserId);
+            sendMessage(chatId,
+                    "Сессия выдачи баланса повреждена. Запустите действие заново.",
+                    adminBackKeyboard());
+            return;
+        }
+
+        if (!message.hasText() || !message.getText().trim().matches("^\\d+$")) {
+            sendMessage(chatId,
+                    "Нужно положительное число токенов. Например: <code>40</code>",
+                    keyboardWithCancel());
+            return;
+        }
+
+        int tokens = Integer.parseInt(message.getText().trim());
+        if (tokens < 1 || tokens > 100000) {
+            sendMessage(chatId,
+                    "Допустимый диапазон: от <b>1</b> до <b>100000</b> токенов.",
+                    keyboardWithCancel());
+            return;
+        }
+
+        long targetId = Long.parseLong(pendingTarget);
+        database.addUserBonusTokens(targetId, tokens);
+        database.clearSession(adminUserId);
+
+        UserBalanceInfo updatedBalance = database.getUserBalance(targetId);
+        sendMessage(chatId,
+                "✅ Начислено <b>" + tokens + " токенов</b> пользователю <code>" + targetId + "</code>.\n\n"
+                        + "Новый баланс пользователя: <b>" + updatedBalance.totalTokens() + " токенов</b>.",
                 adminBackKeyboard());
     }
 
     private void processGenerationAsync(long chatId, long userId, String prompt, String photoFileId) {
         sendMessage(chatId,
-                "⏳ Запускаю генерацию. Обычно это занимает немного времени, отправлю результат сразу как будет готов.",
+                "⏳ Запускаю генерацию. Максимальное время ожидания ответа от ИИ: <b>120 секунд</b>.",
                 null);
 
         generationPool.submit(() -> {
@@ -435,7 +521,11 @@ public class TattooBot extends TelegramLongPollingBot {
                 sendImage(chatId, result,
                         "✅ Готово!\n\n"
                                 + "Если хотите, можно сразу сделать еще вариант с новым промптом 👇");
-                sendMainMenu(chatId, userId, "Выберите следующий режим:");
+                sendMainMenu(chatId, userId, withBalance("Выберите следующий режим:", userId));
+            } catch (AiTimeoutException timeout) {
+                sendMessage(chatId,
+                        "⚠️ Не удалось получить ответ от ИИ за 120 секунд. Попробуйте снова.",
+                        backToMenuKeyboard());
             } catch (Exception e) {
                 log.error("Ошибка генерации для user {}", userId, e);
                 sendMessage(chatId,
@@ -521,30 +611,35 @@ public class TattooBot extends TelegramLongPollingBot {
 
     private void sendUsersList(long chatId) {
         List<UserSummary> users = database.listUsersWithTodayUsage();
-        int defaultLimit = database.getDefaultDailyLimit();
-
         if (users.isEmpty()) {
             sendMessage(chatId, "Пользователей пока нет в базе.", adminBackKeyboard());
             return;
         }
 
+        int dailyGrant = database.getDailySubscriberTokenGrant();
+        int tokenCost = database.getTokenCostPerGeneration();
+
         String header = "👥 <b>Список пользователей</b>\n"
-                + "Лимит по умолчанию: <b>" + defaultLimit + "</b>/день (МСК)\n\n";
+                + "Ежедневный баланс подписчика: <b>" + dailyGrant + " токенов</b>\n"
+                + "Списание за генерацию: <b>" + tokenCost + " токена</b>\n\n";
+
         List<String> chunks = new ArrayList<>();
         StringBuilder current = new StringBuilder(header);
+
         for (UserSummary u : users) {
-            int effectiveLimit = u.personalDailyLimit() != null ? u.personalDailyLimit() : defaultLimit;
             StringBuilder entry = new StringBuilder();
             entry.append("• <code>").append(u.userId()).append("</code>");
             if (u.username() != null && !u.username().isBlank()) {
                 entry.append(" @").append(u.username());
             }
             if (u.firstName() != null && !u.firstName().isBlank()) {
-                entry.append(" (" + safe(u.firstName()) + ")");
+                entry.append(" (").append(safe(u.firstName())).append(")");
             }
             entry.append("\n");
             entry.append("  🔐 ").append(u.admin() ? "админ" : "пользователь").append("\n");
-            entry.append("  📈 сегодня: ").append(u.usedToday()).append("/").append(effectiveLimit).append("\n\n");
+            entry.append("  🎁 бонус: ").append(u.bonusTokens()).append(" токенов\n");
+            entry.append("  📈 сегодня: ").append(u.usedTodayGenerations()).append(" генераций\n");
+            entry.append("  💰 доступно: ").append(u.totalTokens()).append(" токенов\n\n");
 
             if (current.length() + entry.length() > 3500) {
                 chunks.add(current.toString());
@@ -561,16 +656,6 @@ public class TattooBot extends TelegramLongPollingBot {
             sendMessage(chatId, chunk, null);
         }
         sendMessage(chatId, "Панель администратора:", adminBackKeyboard());
-    }
-
-    private void sendDailyLimitReached(long chatId, long userId) {
-        int used = database.getTodayUsage(userId);
-        int limit = database.getEffectiveDailyLimit(userId);
-        sendMessage(chatId,
-                "🚫 <b>Лимит генераций на сегодня исчерпан</b>\n\n"
-                        + "По Москве: <b>" + used + " / " + limit + "</b>\n"
-                        + "Следующий сброс произойдет в 00:00 (МСК).",
-                backToMenuKeyboard());
     }
 
     private void sendMainMenu(long chatId, long userId, String text) {
@@ -591,10 +676,13 @@ public class TattooBot extends TelegramLongPollingBot {
     }
 
     private void sendAdminPanel(long chatId) {
+        int kieInternal = database.getKieInternalBalance();
+
         List<List<InlineKeyboardButton>> rows = new ArrayList<>();
         rows.add(singleButtonRow(callbackButton("👥 Список пользователей", CB_ADMIN_USERS)));
         rows.add(singleButtonRow(callbackButton("➕ Добавить админа", CB_ADMIN_ADD)));
-        rows.add(singleButtonRow(callbackButton("📊 Лимит генераций в день (МСК)", CB_ADMIN_LIMIT)));
+        rows.add(singleButtonRow(callbackButton("💰 Выдать баланс пользователю", CB_ADMIN_GIVE_BALANCE)));
+        rows.add(singleButtonRow(callbackButton("🏦 Учет баланса KIE", CB_ADMIN_KIE)));
         rows.add(singleButtonRow(callbackButton("⬅️ Назад в меню", CB_BACK_MENU)));
 
         InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
@@ -602,8 +690,35 @@ public class TattooBot extends TelegramLongPollingBot {
 
         sendMessage(chatId,
                 "🛠️ <b>Админ-панель</b>\n\n"
+                        + "Текущий внутренний баланс KIE: <b>" + kieInternal + " токенов</b>\n"
                         + "Выберите действие:",
                 markup);
+    }
+
+    private void sendKieAccounting(long chatId, String prefix) {
+        Integer remoteCredits = kieAiClient.getRemainingCredits();
+        int internal = database.getKieInternalBalance();
+        int cost = database.getTokenCostPerGeneration();
+
+        StringBuilder sb = new StringBuilder();
+        if (prefix != null && !prefix.isBlank()) {
+            sb.append(prefix).append("\n\n");
+        }
+
+        sb.append("🏦 <b>Учет баланса KIE</b>\n\n");
+        sb.append("• Внутренний баланс бота: <b>").append(internal).append(" токенов</b>\n");
+        sb.append("• Баланс по API KIE: <b>").append(remoteCredits == null ? "недоступно" : remoteCredits).append("</b>\n");
+        sb.append("• Списание за 1 генерацию: <b>").append(cost).append(" токена</b>\n");
+
+        List<List<InlineKeyboardButton>> rows = new ArrayList<>();
+        rows.add(singleButtonRow(callbackButton("➕ +1000 токенов KIE", CB_ADMIN_KIE_ADD)));
+        rows.add(singleButtonRow(callbackButton("🔄 Обновить", CB_ADMIN_KIE_REFRESH)));
+        rows.add(singleButtonRow(callbackButton("⬅️ В админ-панель", CB_MENU_ADMIN)));
+
+        InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
+        markup.setKeyboard(rows);
+
+        sendMessage(chatId, sb.toString(), markup);
     }
 
     private InlineKeyboardMarkup keyboardWithCancel() {
@@ -743,6 +858,39 @@ public class TattooBot extends TelegramLongPollingBot {
             return config.getRequiredChannelUrl();
         }
         return null;
+    }
+
+    private Long resolveUserIdFromText(String text) {
+        if (text == null || text.isBlank()) {
+            return null;
+        }
+
+        String value = text.trim();
+        if (value.matches("^-?\\d+$")) {
+            try {
+                return Long.parseLong(value);
+            } catch (NumberFormatException ignored) {
+                return null;
+            }
+        }
+
+        if (value.startsWith("@")) {
+            Optional<Long> byUsername = database.findUserIdByUsername(value);
+            return byUsername.orElse(null);
+        }
+
+        return null;
+    }
+
+    private String buildWelcomeWithBalance(long userId) {
+        return withBalance(WELCOME_TEXT, userId);
+    }
+
+    private String withBalance(String text, long userId) {
+        UserBalanceInfo balance = database.getUserBalance(userId);
+        return text + "\n\n"
+                + "💰 <b>Ваш баланс:</b> " + balance.totalTokens() + " токенов ("
+                + balance.availableGenerations() + " ген.)";
     }
 
     private static String safe(String raw) {

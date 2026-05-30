@@ -23,10 +23,8 @@ public class KieAiClient {
     private static final Logger log = LoggerFactory.getLogger(KieAiClient.class);
     private static final Pattern URL_PATTERN = Pattern.compile("https?://[^\\s)\"]+");
 
-    private static final String MODEL_GPT_IMAGE_TEXT = "gpt-image-2-text-to-image";
-    private static final String MODEL_GPT_IMAGE_IMAGE = "gpt-image-2-image-to-image";
-    private static final String MODEL_NANO_BANANA_TEXT = "google/nano-banana";
-    private static final String MODEL_NANO_BANANA_EDIT = "google/nano-banana-edit";
+    private static final String MODEL_NANO_BANANA = "google/nano-banana";
+    private static final long MAX_WAIT_MILLIS = 120_000L;
 
     private final AppConfig config;
     private final ObjectMapper objectMapper;
@@ -42,80 +40,66 @@ public class KieAiClient {
 
     public byte[] generateImage(String prompt, byte[] sourceImageBytes, String sourceMimeType) {
         try {
-            return runGptImageTask(prompt, sourceImageBytes, sourceMimeType);
-        } catch (Exception gptError) {
-            log.warn("GPT Image 2 вернул ошибку, переключаюсь на Nano Banana: {}", gptError.getMessage());
-            try {
-                return runNanoBananaTask(prompt, sourceImageBytes, sourceMimeType);
-            } catch (Exception nanoError) {
-                throw new IllegalStateException(
-                        "Не удалось сгенерировать изображение. GPT Image: " + safeError(gptError)
-                                + " | Nano Banana: " + safeError(nanoError),
-                        nanoError
-                );
+            String taskId = createNanoBananaTask(prompt, sourceImageBytes, sourceMimeType);
+            String resultUrl = pollTaskResultUrl(taskId, MAX_WAIT_MILLIS);
+            if (resultUrl == null || resultUrl.isBlank()) {
+                throw new IllegalStateException("Не удалось получить URL результата");
             }
-        }
-    }
-
-    private byte[] runGptImageTask(String prompt, byte[] sourceImageBytes, String sourceMimeType) {
-        try {
-            String model;
-            var input = objectMapper.createObjectNode();
-            input.put("prompt", prompt);
-            input.put("aspect_ratio", "auto");
-
-            if (sourceImageBytes != null && sourceImageBytes.length > 0) {
-                String imageUrl = uploadImage(sourceImageBytes, sourceMimeType);
-                var urls = objectMapper.createArrayNode();
-                urls.add(imageUrl);
-                input.set("input_urls", urls);
-                model = MODEL_GPT_IMAGE_IMAGE;
-            } else {
-                model = MODEL_GPT_IMAGE_TEXT;
-            }
-
-            return executeTaskAndDownload(model, input);
-        } catch (Exception e) {
-            throw new IllegalStateException("Ошибка GPT Image 2: " + e.getMessage(), e);
-        }
-    }
-
-    private byte[] runNanoBananaTask(String prompt, byte[] sourceImageBytes, String sourceMimeType) {
-        try {
-            String model;
-            var input = objectMapper.createObjectNode();
-            input.put("prompt", prompt);
-            input.put("output_format", "png");
-            input.put("aspect_ratio", "auto");
-
-            if (sourceImageBytes != null && sourceImageBytes.length > 0) {
-                String imageUrl = uploadImage(sourceImageBytes, sourceMimeType);
-                var urls = objectMapper.createArrayNode();
-                urls.add(imageUrl);
-                input.set("image_urls", urls);
-                model = MODEL_NANO_BANANA_EDIT;
-            } else {
-                model = MODEL_NANO_BANANA_TEXT;
-            }
-
-            return executeTaskAndDownload(model, input);
+            return downloadBytes(resultUrl);
+        } catch (AiTimeoutException timeout) {
+            throw timeout;
         } catch (Exception e) {
             throw new IllegalStateException("Ошибка Nano Banana: " + e.getMessage(), e);
         }
     }
 
-    private byte[] executeTaskAndDownload(String model, JsonNode input) throws IOException, InterruptedException {
-        String taskId = createTask(model, input);
-        String resultUrl = pollTaskResultUrl(taskId);
-        if (resultUrl == null || resultUrl.isBlank()) {
-            throw new IllegalStateException("Не удалось получить URL результата");
+    public Integer getRemainingCredits() {
+        String endpoint = "https://api.kie.ai/api/v1/chat/credit";
+        try {
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create(endpoint))
+                    .header("Authorization", "Bearer " + config.getKieApiKey())
+                    .GET()
+                    .timeout(Duration.ofSeconds(15))
+                    .build();
+
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() < 200 || response.statusCode() >= 300) {
+                return null;
+            }
+
+            JsonNode root = objectMapper.readTree(response.body());
+            if (root.path("code").asInt(-1) != 200) {
+                return null;
+            }
+            JsonNode data = root.path("data");
+            if (!data.isNumber()) {
+                return null;
+            }
+            return data.asInt();
+        } catch (Exception e) {
+            log.warn("Не удалось получить баланс кредитов KIE: {}", e.getMessage());
+            return null;
         }
-        return downloadBytes(resultUrl);
     }
 
-    private String createTask(String model, JsonNode input) throws IOException, InterruptedException {
+    private String createNanoBananaTask(String prompt, byte[] sourceImageBytes, String sourceMimeType)
+            throws IOException, InterruptedException {
         var root = objectMapper.createObjectNode();
-        root.put("model", model);
+        root.put("model", MODEL_NANO_BANANA);
+
+        var input = objectMapper.createObjectNode();
+        input.put("prompt", prompt);
+        input.put("output_format", "png");
+        input.put("image_size", "1:1");
+
+        if (sourceImageBytes != null && sourceImageBytes.length > 0) {
+            String imageUrl = uploadImage(sourceImageBytes, sourceMimeType);
+            var urls = objectMapper.createArrayNode();
+            urls.add(imageUrl);
+            input.set("image_urls", urls);
+        }
+
         root.set("input", input);
 
         HttpRequest request = HttpRequest.newBuilder()
@@ -139,53 +123,62 @@ public class KieAiClient {
         return taskId;
     }
 
-    private String pollTaskResultUrl(String taskId) throws InterruptedException, IOException {
-        int attempts = config.getPollAttempts();
-        long delay = config.getPollDelayMillis();
+    private String pollTaskResultUrl(String taskId, long timeoutMillis) throws InterruptedException, IOException {
+        long startedAt = System.currentTimeMillis();
+        long deadline = startedAt + timeoutMillis;
+        long delay = Math.max(500L, config.getPollDelayMillis());
 
-        for (int i = 0; i < attempts; i++) {
+        while (true) {
+            long now = System.currentTimeMillis();
+            long remaining = deadline - now;
+            if (remaining <= 0) {
+                break;
+            }
+
             String url = config.getKieRecordInfoEndpoint() + "?taskId=" + URLEncoder.encode(taskId, StandardCharsets.UTF_8);
+
             HttpRequest request = HttpRequest.newBuilder()
                     .uri(URI.create(url))
                     .header("Authorization", "Bearer " + config.getKieApiKey())
                     .GET()
-                    .timeout(Duration.ofSeconds(20))
+                    .timeout(Duration.ofMillis(Math.min(20_000L, remaining)))
                     .build();
 
             HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-            if (response.statusCode() < 200 || response.statusCode() >= 300) {
-                Thread.sleep(delay);
-                continue;
-            }
+            if (response.statusCode() >= 200 && response.statusCode() < 300) {
+                JsonNode json = objectMapper.readTree(response.body());
+                JsonNode data = json.path("data");
+                String state = data.path("state").asText("");
 
-            JsonNode json = objectMapper.readTree(response.body());
-            JsonNode data = json.path("data");
-            String state = data.path("state").asText("");
-
-            if ("success".equalsIgnoreCase(state)) {
-                String resultJson = data.path("resultJson").asText("");
-                String resultUrl = extractResultUrl(resultJson);
-                if (resultUrl != null) {
-                    return resultUrl;
+                if ("success".equalsIgnoreCase(state)) {
+                    String resultJson = data.path("resultJson").asText("");
+                    String resultUrl = extractResultUrl(resultJson);
+                    if (resultUrl != null) {
+                        return resultUrl;
+                    }
+                    throw new IllegalStateException("Задача завершилась success, но URL результата отсутствует");
                 }
-                throw new IllegalStateException("Задача завершилась success, но URL результата отсутствует");
+
+                if ("fail".equalsIgnoreCase(state)) {
+                    String failMsg = data.path("failMsg").asText("неизвестная ошибка");
+                    throw new IllegalStateException("KIE задача завершилась с ошибкой: " + failMsg);
+                }
             }
 
-            if ("fail".equalsIgnoreCase(state)) {
-                String failMsg = data.path("failMsg").asText("неизвестная ошибка");
-                throw new IllegalStateException("KIE задача завершилась с ошибкой: " + failMsg);
+            long sleepMs = Math.min(delay, Math.max(0L, deadline - System.currentTimeMillis()));
+            if (sleepMs > 0) {
+                Thread.sleep(sleepMs);
             }
-
-            Thread.sleep(delay);
         }
 
-        throw new IllegalStateException("Превышено время ожидания генерации");
+        throw new AiTimeoutException("Время ожидания ответа AI превысило 120 секунд");
     }
 
     private String extractResultUrl(String resultJson) {
         if (resultJson == null || resultJson.isBlank()) {
             return null;
         }
+
         try {
             JsonNode parsed = objectMapper.readTree(resultJson);
             List<String> candidates = new ArrayList<>();
@@ -217,6 +210,7 @@ public class KieAiClient {
                 return fallback;
             }
         }
+
         return null;
     }
 
@@ -282,12 +276,5 @@ public class KieAiClient {
             return matcher.group();
         }
         return null;
-    }
-
-    private static String safeError(Exception exception) {
-        if (exception == null || exception.getMessage() == null) {
-            return "unknown";
-        }
-        return exception.getMessage().replace("\n", " ").trim();
     }
 }

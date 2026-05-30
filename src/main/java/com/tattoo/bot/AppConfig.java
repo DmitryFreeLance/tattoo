@@ -11,7 +11,6 @@ public class AppConfig {
     private final String dbPath;
     private final int defaultDailyLimit;
     private final Long initialAdminId;
-    private final int pollAttempts;
     private final long pollDelayMillis;
     private final String kieCreateTaskEndpoint;
     private final String kieRecordInfoEndpoint;
@@ -26,7 +25,6 @@ public class AppConfig {
             String dbPath,
             int defaultDailyLimit,
             Long initialAdminId,
-            int pollAttempts,
             long pollDelayMillis,
             String kieCreateTaskEndpoint,
             String kieRecordInfoEndpoint,
@@ -40,7 +38,6 @@ public class AppConfig {
         this.dbPath = dbPath;
         this.defaultDailyLimit = defaultDailyLimit;
         this.initialAdminId = initialAdminId;
-        this.pollAttempts = pollAttempts;
         this.pollDelayMillis = pollDelayMillis;
         this.kieCreateTaskEndpoint = kieCreateTaskEndpoint;
         this.kieRecordInfoEndpoint = kieRecordInfoEndpoint;
@@ -65,7 +62,6 @@ public class AppConfig {
         String dbPath = envOrDefault(env, "DB_PATH", "./data/bot.db");
         int defaultDailyLimit = intEnv(env, "DEFAULT_DAILY_LIMIT", 20);
         Long initialAdminId = longEnvNullable(env, "INITIAL_ADMIN_ID");
-        int pollAttempts = intEnv(env, "KIE_POLL_ATTEMPTS", 40);
         long pollDelayMillis = longEnv(env, "KIE_POLL_DELAY_MS", 1_800L);
 
         String kieCreateTaskEndpoint = envOrDefault(env,
@@ -97,7 +93,6 @@ public class AppConfig {
                 dbPath,
                 Math.max(defaultDailyLimit, 1),
                 initialAdminId,
-                Math.max(pollAttempts, 10),
                 Math.max(pollDelayMillis, 500L),
                 kieCreateTaskEndpoint,
                 kieRecordInfoEndpoint,
@@ -190,10 +185,6 @@ public class AppConfig {
 
     public Long getInitialAdminId() {
         return initialAdminId;
-    }
-
-    public int getPollAttempts() {
-        return pollAttempts;
     }
 
     public long getPollDelayMillis() {

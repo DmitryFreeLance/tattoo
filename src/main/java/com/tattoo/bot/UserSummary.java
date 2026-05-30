@@ -5,7 +5,9 @@ public record UserSummary(
         String username,
         String firstName,
         boolean admin,
-        Integer personalDailyLimit,
-        int usedToday
+        int bonusTokens,
+        int usedTodayGenerations,
+        int dailyRemainingTokens,
+        int totalTokens
 ) {
 }
