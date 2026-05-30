@@ -42,6 +42,7 @@ public class TattooBot extends TelegramLongPollingBot {
 
     private static final String CB_CHECK_SUB = "sub_check";
     private static final String CB_MENU_TRANSFER = "menu_transfer";
+    // Legacy callback from old messages (button removed from current menu).
     private static final String CB_MENU_SKETCH = "menu_sketch";
     private static final String CB_MENU_FREE = "menu_free";
     private static final String CB_MENU_ADMIN = "menu_admin";
@@ -55,13 +56,14 @@ public class TattooBot extends TelegramLongPollingBot {
     private static final String CB_BACK_MENU = "back_menu";
     private static final String CB_CANCEL = "cancel";
 
-    private static final String PROMPT_TRANSFER = "Обработка изображения так, чтобы сделать из этого рисунка контурный линейный рисунок с обозначениями теней пунктиром контуров линиями разной толщины.";
-    private static final String PROMPT_SKETCH = "Сделай из исходного фото чистый художественный тату-эскиз: выразительные контуры, логичные тени, аккуратная композиция для переноса на кожу, без лишнего фона и визуального мусора.";
+    private static final String PROMPT_TRANSFER = "Обработка изображения так, чтобы сделать из этого рисунка контурный линейный рисунок с обозначениями теней пунктиром и линиями разной толщины.";
+    private static final String CONTRAST_BLACK_INSTRUCTION =
+            "Сделай результат более контрастным: более насыщенный черный, глубокие темные зоны, четкие черные контуры. " +
+                    "Сохраняй читаемость деталей, без серой \"мутности\".";
 
     private static final String WELCOME_TEXT = "👋 <b>Добро пожаловать в Tattoo Assistant</b>\n\n"
             + "Я помогу быстро подготовить:\n"
             + "• 🖼️ трансферный рисунок\n"
-            + "• 🎨 тату-эскиз\n"
             + "• 🧠 свободную генерацию по вашему промпту\n\n"
             + "Выберите режим ниже 👇";
 
@@ -143,11 +145,9 @@ public class TattooBot extends TelegramLongPollingBot {
                         keyboardWithCancel());
             }
             case CB_MENU_SKETCH -> {
-                database.setSession(userId, ConversationState.WAIT_SKETCH_PHOTO, null);
-                sendMessage(chatId,
-                        "🎨 <b>Эскиз</b>\n\n"
-                                + "Отправьте <b>одно фото</b> и я сделаю тату-эскиз: чистая форма, контуры и читаемые тени.",
-                        keyboardWithCancel());
+                database.clearSession(userId);
+                sendMainMenu(chatId, userId,
+                        withBalance("ℹ️ Режим <b>«Эскиз»</b> отключен. Используйте доступные режимы ниже 👇", userId));
             }
             case CB_MENU_FREE -> {
                 database.setSession(userId, ConversationState.WAIT_FREE_INPUT, null);
@@ -195,7 +195,7 @@ public class TattooBot extends TelegramLongPollingBot {
                 }
                 database.setSession(userId, ConversationState.WAIT_BONUS_TARGET, null);
                 sendMessage(chatId,
-                        "💰 <b>Выдача баланса пользователю</b>\n\n"
+                        "🎟️ <b>Выдача дополнительных генераций</b>\n\n"
                                 + "Пришлите ID пользователя или @username.",
                         keyboardWithCancel());
             }
@@ -263,7 +263,11 @@ public class TattooBot extends TelegramLongPollingBot {
 
         switch (session.state()) {
             case WAIT_TRANSFER_PHOTO -> handleTransferInput(message, userId, chatId);
-            case WAIT_SKETCH_PHOTO -> handleSketchInput(message, userId, chatId);
+            case WAIT_SKETCH_PHOTO -> {
+                database.clearSession(userId);
+                sendMainMenu(chatId, userId,
+                        withBalance("ℹ️ Режим <b>«Эскиз»</b> отключен. Выберите другой режим 👇", userId));
+            }
             case WAIT_FREE_INPUT, WAIT_FREE_PROMPT -> handleFreeInput(message, session, userId, chatId);
             case WAIT_ADMIN_ID -> handleAdminAddInput(message, userId, chatId);
             case WAIT_BONUS_TARGET -> handleBonusTargetInput(message, userId, chatId);
@@ -291,22 +295,6 @@ public class TattooBot extends TelegramLongPollingBot {
 
         database.clearSession(userId);
         processGenerationAsync(chatId, userId, PROMPT_TRANSFER, getLargestPhoto(message.getPhoto()).getFileId());
-    }
-
-    private void handleSketchInput(Message message, long userId, long chatId) {
-        if (!message.hasPhoto()) {
-            sendMessage(chatId,
-                    "🎨 Для эскиза нужно фото. Отправьте изображение, и я начну обработку.",
-                    keyboardWithCancel());
-            return;
-        }
-
-        if (!consumeTokensOrNotify(chatId, userId)) {
-            return;
-        }
-
-        database.clearSession(userId);
-        processGenerationAsync(chatId, userId, PROMPT_SKETCH, getLargestPhoto(message.getPhoto()).getFileId());
     }
 
     private void handleFreeInput(Message message, SessionData session, long userId, long chatId) {
@@ -438,8 +426,8 @@ public class TattooBot extends TelegramLongPollingBot {
 
         database.setSession(adminUserId, ConversationState.WAIT_BONUS_AMOUNT, String.valueOf(targetId));
         sendMessage(chatId,
-                "💰 Пользователь: <code>" + targetId + "</code>\n"
-                        + "Теперь пришлите сумму токенов для начисления (например <code>40</code>).",
+                "🎟️ Пользователь: <code>" + targetId + "</code>\n"
+                        + "Теперь пришлите количество <b>дополнительных генераций</b> (например <code>10</code>).",
                 keyboardWithCancel());
     }
 
@@ -461,27 +449,31 @@ public class TattooBot extends TelegramLongPollingBot {
 
         if (!message.hasText() || !message.getText().trim().matches("^\\d+$")) {
             sendMessage(chatId,
-                    "Нужно положительное число токенов. Например: <code>40</code>",
+                    "Нужно положительное число генераций. Например: <code>10</code>",
                     keyboardWithCancel());
             return;
         }
 
-        int tokens = Integer.parseInt(message.getText().trim());
-        if (tokens < 1 || tokens > 100000) {
+        int generations = Integer.parseInt(message.getText().trim());
+        if (generations < 1 || generations > 10000) {
             sendMessage(chatId,
-                    "Допустимый диапазон: от <b>1</b> до <b>100000</b> токенов.",
+                    "Допустимый диапазон: от <b>1</b> до <b>10000</b> генераций.",
                     keyboardWithCancel());
             return;
         }
 
         long targetId = Long.parseLong(pendingTarget);
+        int tokenCost = database.getTokenCostPerGeneration();
+        int tokens = generations * tokenCost;
         database.addUserBonusTokens(targetId, tokens);
         database.clearSession(adminUserId);
 
         UserBalanceInfo updatedBalance = database.getUserBalance(targetId);
         sendMessage(chatId,
-                "✅ Начислено <b>" + tokens + " токенов</b> пользователю <code>" + targetId + "</code>.\n\n"
-                        + "Новый баланс пользователя: <b>" + updatedBalance.totalTokens() + " токенов</b>.",
+                "✅ Начислено <b>" + generations + " доп. генераций</b> пользователю <code>" + targetId + "</code>.\n"
+                        + "Это <b>" + tokens + " токенов</b>.\n\n"
+                        + "Новый баланс пользователя: <b>" + updatedBalance.totalTokens() + " токенов</b> ("
+                        + updatedBalance.availableGenerations() + " ген.).",
                 adminBackKeyboard());
     }
 
@@ -500,7 +492,8 @@ public class TattooBot extends TelegramLongPollingBot {
                     photoBytes = downloadTelegramPhoto(photoFileId);
                 }
 
-                byte[] result = kieAiClient.generateImage(prompt, photoBytes, mimeType);
+                String effectivePrompt = buildModelPrompt(prompt);
+                byte[] result = kieAiClient.generateImage(effectivePrompt, photoBytes, mimeType);
                 sendImage(chatId, result,
                         "✅ Готово!\n\n"
                                 + "Если хотите, можно сразу сделать еще вариант с новым промптом 👇");
@@ -620,7 +613,8 @@ public class TattooBot extends TelegramLongPollingBot {
             }
             entry.append("\n");
             entry.append("  🔐 ").append(u.admin() ? "админ" : "пользователь").append("\n");
-            entry.append("  🎁 бонус: ").append(u.bonusTokens()).append(" токенов\n");
+            entry.append("  🎁 бонус: ").append(u.bonusTokens()).append(" токенов (")
+                    .append(u.bonusTokens() / Math.max(1, tokenCost)).append(" доп. ген.)\n");
             entry.append("  📈 сегодня: ").append(u.usedTodayGenerations()).append(" генераций\n");
             entry.append("  💰 доступно: ").append(u.totalTokens()).append(" токенов\n\n");
 
@@ -646,7 +640,6 @@ public class TattooBot extends TelegramLongPollingBot {
 
         List<List<InlineKeyboardButton>> rows = new ArrayList<>();
         rows.add(singleButtonRow(callbackButton("🖼️ Трансферный рисунок", CB_MENU_TRANSFER)));
-        rows.add(singleButtonRow(callbackButton("🎨 Эскиз", CB_MENU_SKETCH)));
         rows.add(singleButtonRow(callbackButton("🧠 Свободная генерация", CB_MENU_FREE)));
         if (admin) {
             rows.add(singleButtonRow(callbackButton("🛠️ Админ-панель", CB_MENU_ADMIN)));
@@ -662,7 +655,7 @@ public class TattooBot extends TelegramLongPollingBot {
         List<List<InlineKeyboardButton>> rows = new ArrayList<>();
         rows.add(singleButtonRow(callbackButton("👥 Список пользователей", CB_ADMIN_USERS)));
         rows.add(singleButtonRow(callbackButton("➕ Добавить админа", CB_ADMIN_ADD)));
-        rows.add(singleButtonRow(callbackButton("💰 Выдать баланс пользователю", CB_ADMIN_GIVE_BALANCE)));
+        rows.add(singleButtonRow(callbackButton("🎟️ Выдать доп. генерации", CB_ADMIN_GIVE_BALANCE)));
         rows.add(singleButtonRow(callbackButton("🏦 Учет баланса KIE", CB_ADMIN_KIE)));
         rows.add(singleButtonRow(callbackButton("⬅️ Назад в меню", CB_BACK_MENU)));
 
@@ -857,6 +850,14 @@ public class TattooBot extends TelegramLongPollingBot {
 
     private String buildWelcomeWithBalance(long userId) {
         return withBalance(WELCOME_TEXT, userId);
+    }
+
+    private String buildModelPrompt(String basePrompt) {
+        String prompt = basePrompt == null ? "" : basePrompt.trim();
+        if (prompt.isEmpty()) {
+            prompt = "Подготовь изображение для тату-работы.";
+        }
+        return prompt + "\n\n" + CONTRAST_BLACK_INSTRUCTION;
     }
 
     private String withBalance(String text, long userId) {
