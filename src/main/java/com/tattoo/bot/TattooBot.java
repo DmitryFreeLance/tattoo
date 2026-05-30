@@ -6,10 +6,13 @@ import org.telegram.telegrambots.bots.TelegramLongPollingBot;
 import org.telegram.telegrambots.meta.api.methods.AnswerCallbackQuery;
 import org.telegram.telegrambots.meta.api.methods.ActionType;
 import org.telegram.telegrambots.meta.api.methods.GetFile;
+import org.telegram.telegrambots.meta.api.methods.groupadministration.CreateChatInviteLink;
+import org.telegram.telegrambots.meta.api.methods.groupadministration.ExportChatInviteLink;
 import org.telegram.telegrambots.meta.api.methods.groupadministration.GetChatMember;
 import org.telegram.telegrambots.meta.api.methods.send.SendChatAction;
 import org.telegram.telegrambots.meta.api.methods.send.SendMessage;
 import org.telegram.telegrambots.meta.api.methods.send.SendPhoto;
+import org.telegram.telegrambots.meta.api.objects.ChatInviteLink;
 import org.telegram.telegrambots.meta.api.objects.CallbackQuery;
 import org.telegram.telegrambots.meta.api.objects.Message;
 import org.telegram.telegrambots.meta.api.objects.PhotoSize;
@@ -27,6 +30,7 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
@@ -217,7 +221,12 @@ public class TattooBot extends TelegramLongPollingBot {
             }
             database.clearSession(userId);
             sendMainMenu(chatId, userId,
-                    "👋 Добро пожаловать! Я помогу быстро сделать трансфер, эскиз или свободную генерацию для вашей тату-работы.");
+                    "👋 <b>Добро пожаловать в Tattoo Assistant</b>\n\n"
+                            + "Я помогу быстро подготовить:\n"
+                            + "• 🖼️ трансферный рисунок\n"
+                            + "• 🎨 тату-эскиз\n"
+                            + "• 🧠 свободную генерацию по вашему промпту\n\n"
+                            + "Выберите режим ниже 👇");
             return;
         }
 
@@ -492,14 +501,22 @@ public class TattooBot extends TelegramLongPollingBot {
     }
 
     private void sendSubscriptionGate(long chatId, String text) {
+        String inviteLink = resolveInviteLink();
         List<List<InlineKeyboardButton>> rows = new ArrayList<>();
-        rows.add(singleButtonRow(urlButton("📢 Подписаться на канал", config.getRequiredChannelUrl())));
+        if (inviteLink != null && !inviteLink.isBlank()) {
+            rows.add(singleButtonRow(urlButton("📢 Подписаться на канал", inviteLink)));
+        }
         rows.add(singleButtonRow(callbackButton("✅ Я подписался", CB_CHECK_SUB)));
 
         InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
         markup.setKeyboard(rows);
 
-        sendMessage(chatId, text, markup);
+        String effectiveText = text;
+        if (inviteLink == null || inviteLink.isBlank()) {
+            effectiveText += "\n\n⚠️ Не удалось автоматически получить ссылку на канал. "
+                    + "Проверьте, что у бота есть право приглашать пользователей.";
+        }
+        sendMessage(chatId, effectiveText, markup);
     }
 
     private void sendUsersList(long chatId) {
@@ -567,16 +584,10 @@ public class TattooBot extends TelegramLongPollingBot {
             rows.add(singleButtonRow(callbackButton("🛠️ Админ-панель", CB_MENU_ADMIN)));
         }
 
-        int used = database.getTodayUsage(userId);
-        int limit = database.getEffectiveDailyLimit(userId);
-
         InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
         markup.setKeyboard(rows);
 
-        sendMessage(chatId,
-                text + "\n\n"
-                        + "📊 Сегодня (МСК): <b>" + used + " / " + limit + "</b>",
-                markup);
+        sendMessage(chatId, text, markup);
     }
 
     private void sendAdminPanel(long chatId) {
@@ -698,6 +709,40 @@ public class TattooBot extends TelegramLongPollingBot {
         return photos.stream()
                 .max(Comparator.comparing(PhotoSize::getFileSize, Comparator.nullsFirst(Integer::compareTo)))
                 .orElse(photos.get(photos.size() - 1));
+    }
+
+    private String resolveInviteLink() {
+        String chatId = config.getRequiredChannelId();
+
+        try {
+            CreateChatInviteLink createLink = new CreateChatInviteLink();
+            createLink.setChatId(chatId);
+            createLink.setName("tattoo-bot-" + System.currentTimeMillis());
+            createLink.setExpireDate((int) Instant.now().plus(Duration.ofDays(7)).getEpochSecond());
+
+            ChatInviteLink invite = execute(createLink);
+            if (invite != null && invite.getInviteLink() != null && !invite.getInviteLink().isBlank()) {
+                return invite.getInviteLink();
+            }
+        } catch (TelegramApiException e) {
+            log.warn("Не удалось создать новую invite-ссылку: {}", e.getMessage());
+        }
+
+        try {
+            ExportChatInviteLink export = new ExportChatInviteLink();
+            export.setChatId(chatId);
+            String invite = execute(export);
+            if (invite != null && !invite.isBlank()) {
+                return invite;
+            }
+        } catch (TelegramApiException e) {
+            log.warn("Не удалось получить primary invite-ссылку: {}", e.getMessage());
+        }
+
+        if (config.getRequiredChannelUrl() != null && !config.getRequiredChannelUrl().isBlank()) {
+            return config.getRequiredChannelUrl();
+        }
+        return null;
     }
 
     private static String safe(String raw) {

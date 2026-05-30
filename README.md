@@ -36,7 +36,7 @@
 - `TELEGRAM_BOT_TOKEN`
 - `KIE_API_KEY`
 - `REQUIRED_CHANNEL_ID`
-- `REQUIRED_CHANNEL_URL`
+- `REQUIRED_CHANNEL_URL` (опционально, fallback если авто-генерация ссылки недоступна)
 
 Опционально:
 - `INITIAL_ADMIN_ID`
@@ -68,4 +68,3 @@ docker run --env-file .env -v $(pwd)/data:/app/data tattoo-bot
 ## Важно про Gemini 3 Flash
 По документации KIE для `Gemini 3 Flash (openai)` endpoint — это чат/completions-интерфейс (текстовый ответ, мультимодальный ввод).
 На практике для надежной выдачи картинки в этом боте включен fallback на GPT Image 2.
-

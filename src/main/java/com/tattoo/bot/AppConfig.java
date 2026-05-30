@@ -93,9 +93,6 @@ public class AppConfig {
         if (isBlank(requiredChannelId)) {
             throw new IllegalArgumentException("Не задан REQUIRED_CHANNEL_ID (например @my_channel или -1001234567890)");
         }
-        if (isBlank(requiredChannelUrl)) {
-            throw new IllegalArgumentException("Не задан REQUIRED_CHANNEL_URL (например https://t.me/my_channel)");
-        }
 
         return new AppConfig(
                 botToken,
