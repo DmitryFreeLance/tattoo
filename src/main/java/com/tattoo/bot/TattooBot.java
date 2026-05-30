@@ -1,0 +1,716 @@
+package com.tattoo.bot;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.telegram.telegrambots.bots.TelegramLongPollingBot;
+import org.telegram.telegrambots.meta.api.methods.AnswerCallbackQuery;
+import org.telegram.telegrambots.meta.api.methods.ActionType;
+import org.telegram.telegrambots.meta.api.methods.GetFile;
+import org.telegram.telegrambots.meta.api.methods.groupadministration.GetChatMember;
+import org.telegram.telegrambots.meta.api.methods.send.SendChatAction;
+import org.telegram.telegrambots.meta.api.methods.send.SendMessage;
+import org.telegram.telegrambots.meta.api.methods.send.SendPhoto;
+import org.telegram.telegrambots.meta.api.objects.CallbackQuery;
+import org.telegram.telegrambots.meta.api.objects.Message;
+import org.telegram.telegrambots.meta.api.objects.PhotoSize;
+import org.telegram.telegrambots.meta.api.objects.Update;
+import org.telegram.telegrambots.meta.api.objects.User;
+import org.telegram.telegrambots.meta.api.objects.chatmember.ChatMember;
+import org.telegram.telegrambots.meta.api.objects.replykeyboard.InlineKeyboardMarkup;
+import org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton;
+import org.telegram.telegrambots.meta.api.objects.InputFile;
+import org.telegram.telegrambots.meta.exceptions.TelegramApiException;
+
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
+import java.time.Duration;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.List;
+import java.util.Optional;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+
+public class TattooBot extends TelegramLongPollingBot {
+    private static final Logger log = LoggerFactory.getLogger(TattooBot.class);
+
+    private static final String CB_CHECK_SUB = "sub_check";
+    private static final String CB_MENU_TRANSFER = "menu_transfer";
+    private static final String CB_MENU_SKETCH = "menu_sketch";
+    private static final String CB_MENU_FREE = "menu_free";
+    private static final String CB_MENU_ADMIN = "menu_admin";
+    private static final String CB_ADMIN_USERS = "admin_users";
+    private static final String CB_ADMIN_ADD = "admin_add";
+    private static final String CB_ADMIN_LIMIT = "admin_limit";
+    private static final String CB_ADMIN_BACK = "admin_back";
+    private static final String CB_BACK_MENU = "back_menu";
+    private static final String CB_CANCEL = "cancel";
+
+    private static final String PROMPT_TRANSFER = "Обработка изображения так, чтобы сделать из этого рисунка контурный линейный рисунок с обозначениями теней пунктиром контуров линиями разной толщины.";
+    private static final String PROMPT_SKETCH = "Сделай из исходного фото чистый художественный тату-эскиз: выразительные контуры, логичные тени, аккуратная композиция для переноса на кожу, без лишнего фона и визуального мусора.";
+
+    private final AppConfig config;
+    private final Database database;
+    private final KieAiClient kieAiClient;
+    private final HttpClient httpClient;
+    private final ExecutorService generationPool;
+
+    public TattooBot(AppConfig config, Database database, KieAiClient kieAiClient) {
+        super(config.getBotToken());
+        this.config = config;
+        this.database = database;
+        this.kieAiClient = kieAiClient;
+        this.httpClient = HttpClient.newBuilder()
+                .connectTimeout(Duration.ofSeconds(20))
+                .build();
+        this.generationPool = Executors.newFixedThreadPool(4);
+    }
+
+    @Override
+    public String getBotUsername() {
+        return config.getBotUsername();
+    }
+
+    @Override
+    public void onUpdateReceived(Update update) {
+        try {
+            if (update == null) {
+                return;
+            }
+            if (update.hasCallbackQuery()) {
+                handleCallback(update.getCallbackQuery());
+                return;
+            }
+            if (update.hasMessage()) {
+                handleMessage(update.getMessage());
+            }
+        } catch (Exception e) {
+            log.error("Ошибка обработки update", e);
+        }
+    }
+
+    private void handleCallback(CallbackQuery callback) {
+        answerCallback(callback.getId());
+
+        if (callback == null || callback.getFrom() == null || callback.getMessage() == null) {
+            return;
+        }
+
+        User user = callback.getFrom();
+        long userId = user.getId();
+        long chatId = callback.getMessage().getChatId();
+        String data = callback.getData();
+
+        database.upsertUser(user);
+
+        if (CB_CHECK_SUB.equals(data)) {
+            if (isSubscribed(userId)) {
+                database.clearSession(userId);
+                sendMainMenu(chatId, userId, "✅ Подписка подтверждена! Добро пожаловать в меню.");
+            } else {
+                sendSubscriptionGate(chatId, "Пока не вижу подписку. Подпишитесь на канал и нажмите кнопку еще раз 👇");
+            }
+            return;
+        }
+
+        if (!ensureSubscribed(userId, chatId)) {
+            return;
+        }
+
+        switch (data) {
+            case CB_MENU_TRANSFER -> {
+                database.setSession(userId, ConversationState.WAIT_TRANSFER_PHOTO, null);
+                sendMessage(chatId,
+                        "🖼️ <b>Трансферный рисунок</b>\n\n"
+                                + "Пришлите <b>одно фото</b>, и я подготовлю контурный трансфер для переноса.\n"
+                                + "Только фото, текст сейчас не обрабатываю.",
+                        keyboardWithCancel());
+            }
+            case CB_MENU_SKETCH -> {
+                database.setSession(userId, ConversationState.WAIT_SKETCH_PHOTO, null);
+                sendMessage(chatId,
+                        "🎨 <b>Эскиз</b>\n\n"
+                                + "Отправьте <b>одно фото</b> и я сделаю тату-эскиз: чистая форма, контуры и читаемые тени.",
+                        keyboardWithCancel());
+            }
+            case CB_MENU_FREE -> {
+                database.setSession(userId, ConversationState.WAIT_FREE_INPUT, null);
+                sendMessage(chatId,
+                        "🧠 <b>Свободная генерация</b>\n\n"
+                                + "Варианты:\n"
+                                + "1) Фото + подпись (промпт) одним сообщением\n"
+                                + "2) Сначала фото, потом отдельным сообщением промпт\n"
+                                + "3) Только текстовый промпт\n\n"
+                                + "Важно: без промпта генерация не запускается.",
+                        keyboardWithCancel());
+            }
+            case CB_MENU_ADMIN -> {
+                if (!database.isAdmin(userId)) {
+                    sendMessage(chatId, "⛔️ Админ-панель доступна только администраторам.", backToMenuKeyboard());
+                    return;
+                }
+                sendAdminPanel(chatId);
+            }
+            case CB_ADMIN_USERS -> {
+                if (!database.isAdmin(userId)) {
+                    sendMessage(chatId, "⛔️ Недостаточно прав.", backToMenuKeyboard());
+                    return;
+                }
+                sendUsersList(chatId);
+            }
+            case CB_ADMIN_ADD -> {
+                if (!database.isAdmin(userId)) {
+                    sendMessage(chatId, "⛔️ Недостаточно прав.", backToMenuKeyboard());
+                    return;
+                }
+                database.setSession(userId, ConversationState.WAIT_ADMIN_ID, null);
+                sendMessage(chatId,
+                        "➕ <b>Добавление администратора</b>\n\n"
+                                + "Пришлите:\n"
+                                + "• ID пользователя (например <code>123456789</code>)\n"
+                                + "или\n"
+                                + "• @username (если пользователь уже писал боту).",
+                        keyboardWithCancel());
+            }
+            case CB_ADMIN_LIMIT -> {
+                if (!database.isAdmin(userId)) {
+                    sendMessage(chatId, "⛔️ Недостаточно прав.", backToMenuKeyboard());
+                    return;
+                }
+                database.setSession(userId, ConversationState.WAIT_DAILY_LIMIT, null);
+                sendMessage(chatId,
+                        "📊 <b>Лимит генераций в день (МСК)</b>\n\n"
+                                + "Текущее значение: <b>" + database.getDefaultDailyLimit() + "</b>\n"
+                                + "Отправьте новое число (например <code>30</code>).",
+                        keyboardWithCancel());
+            }
+            case CB_ADMIN_BACK, CB_BACK_MENU, CB_CANCEL -> {
+                database.clearSession(userId);
+                sendMainMenu(chatId, userId, "Главное меню снова перед вами 👇");
+            }
+            default -> sendMainMenu(chatId, userId, "Меню обновлено 👇");
+        }
+    }
+
+    private void handleMessage(Message message) {
+        if (message == null || message.getFrom() == null || message.getChat() == null) {
+            return;
+        }
+
+        if (!"private".equalsIgnoreCase(message.getChat().getType())) {
+            return;
+        }
+
+        User user = message.getFrom();
+        long userId = user.getId();
+        long chatId = message.getChatId();
+        String text = message.hasText() ? message.getText().trim() : "";
+
+        database.upsertUser(user);
+
+        if (text.startsWith("/start") || text.startsWith("/menu") || text.startsWith("/help")) {
+            if (!ensureSubscribed(userId, chatId)) {
+                return;
+            }
+            database.clearSession(userId);
+            sendMainMenu(chatId, userId,
+                    "👋 Добро пожаловать! Я помогу быстро сделать трансфер, эскиз или свободную генерацию для вашей тату-работы.");
+            return;
+        }
+
+        if (!ensureSubscribed(userId, chatId)) {
+            return;
+        }
+
+        SessionData session = database.getSession(userId);
+
+        if (!database.isAdmin(userId)
+                && (session.state() == ConversationState.WAIT_ADMIN_ID || session.state() == ConversationState.WAIT_DAILY_LIMIT)) {
+            database.clearSession(userId);
+            sendMainMenu(chatId, userId, "Сессия администратора закрыта. Возвращаю вас в меню.");
+            return;
+        }
+
+        switch (session.state()) {
+            case WAIT_TRANSFER_PHOTO -> handleTransferInput(message, userId, chatId);
+            case WAIT_SKETCH_PHOTO -> handleSketchInput(message, userId, chatId);
+            case WAIT_FREE_INPUT, WAIT_FREE_PROMPT -> handleFreeInput(message, session, userId, chatId);
+            case WAIT_ADMIN_ID -> handleAdminAddInput(message, userId, chatId);
+            case WAIT_DAILY_LIMIT -> handleDailyLimitInput(message, userId, chatId);
+            case IDLE -> {
+                if (message.hasPhoto() || (message.hasText() && !message.getText().startsWith("/"))) {
+                    sendMainMenu(chatId, userId,
+                            "Чтобы не потеряться в сценариях, выберите действие в меню ниже 👇");
+                }
+            }
+        }
+    }
+
+    private void handleTransferInput(Message message, long userId, long chatId) {
+        if (!message.hasPhoto()) {
+            sendMessage(chatId,
+                    "🖼️ Для трансфера нужно именно <b>фото</b>. Отправьте одно изображение, и я продолжу.",
+                    keyboardWithCancel());
+            return;
+        }
+
+        if (!database.tryConsumeGeneration(userId)) {
+            sendDailyLimitReached(chatId, userId);
+            return;
+        }
+
+        database.clearSession(userId);
+        processGenerationAsync(chatId, userId, PROMPT_TRANSFER, getLargestPhoto(message.getPhoto()).getFileId());
+    }
+
+    private void handleSketchInput(Message message, long userId, long chatId) {
+        if (!message.hasPhoto()) {
+            sendMessage(chatId,
+                    "🎨 Для эскиза нужно фото. Отправьте изображение, и я начну обработку.",
+                    keyboardWithCancel());
+            return;
+        }
+
+        if (!database.tryConsumeGeneration(userId)) {
+            sendDailyLimitReached(chatId, userId);
+            return;
+        }
+
+        database.clearSession(userId);
+        processGenerationAsync(chatId, userId, PROMPT_SKETCH, getLargestPhoto(message.getPhoto()).getFileId());
+    }
+
+    private void handleFreeInput(Message message, SessionData session, long userId, long chatId) {
+        String pendingPhotoFileId = session.pendingPhotoFileId();
+
+        if (message.hasPhoto()) {
+            PhotoSize largest = getLargestPhoto(message.getPhoto());
+            String prompt = message.getCaption();
+
+            if (prompt != null && !prompt.trim().isEmpty()) {
+                if (!database.tryConsumeGeneration(userId)) {
+                    sendDailyLimitReached(chatId, userId);
+                    return;
+                }
+                database.clearSession(userId);
+                processGenerationAsync(chatId, userId, prompt.trim(), largest.getFileId());
+                return;
+            }
+
+            database.setSession(userId, ConversationState.WAIT_FREE_PROMPT, largest.getFileId());
+            sendMessage(chatId,
+                    "📝 Фото получил. Теперь пришлите текстовый промпт, и я запущу генерацию.",
+                    keyboardWithCancel());
+            return;
+        }
+
+        if (message.hasText()) {
+            String prompt = message.getText().trim();
+            if (prompt.isBlank()) {
+                sendMessage(chatId, "Промпт пустой. Напишите, что нужно сгенерировать ✍️", keyboardWithCancel());
+                return;
+            }
+            if (prompt.startsWith("/")) {
+                sendMessage(chatId, "Команда сейчас не ожидается. Пришлите промпт текстом 👇", keyboardWithCancel());
+                return;
+            }
+
+            if (!database.tryConsumeGeneration(userId)) {
+                sendDailyLimitReached(chatId, userId);
+                return;
+            }
+
+            database.clearSession(userId);
+            processGenerationAsync(chatId, userId, prompt, pendingPhotoFileId);
+            return;
+        }
+
+        sendMessage(chatId,
+                "🧠 Для свободной генерации отправьте фото и/или текстовый промпт."
+                        + " Без промпта запуск невозможен.",
+                keyboardWithCancel());
+    }
+
+    private void handleAdminAddInput(Message message, long adminUserId, long chatId) {
+        if (!database.isAdmin(adminUserId)) {
+            database.clearSession(adminUserId);
+            sendMessage(chatId, "⛔️ Недостаточно прав.", backToMenuKeyboard());
+            return;
+        }
+
+        Long targetId = null;
+        if (message.hasText()) {
+            String text = message.getText().trim();
+            if (text.matches("^-?\\d+$")) {
+                targetId = Long.parseLong(text);
+            } else if (text.startsWith("@")) {
+                Optional<Long> byUsername = database.findUserIdByUsername(text);
+                if (byUsername.isPresent()) {
+                    targetId = byUsername.get();
+                } else {
+                    sendMessage(chatId,
+                            "Пользователь с таким username пока не найден в базе."
+                                    + " Попросите его сначала написать боту /start.",
+                            keyboardWithCancel());
+                    return;
+                }
+            }
+        }
+
+        if (targetId == null) {
+            sendMessage(chatId,
+                    "Не удалось распознать ID. Пришлите число вида <code>123456789</code> или @username.",
+                    keyboardWithCancel());
+            return;
+        }
+
+        database.addAdmin(targetId);
+        database.clearSession(adminUserId);
+        sendMessage(chatId,
+                "✅ Пользователь <code>" + targetId + "</code> назначен администратором.",
+                adminBackKeyboard());
+    }
+
+    private void handleDailyLimitInput(Message message, long adminUserId, long chatId) {
+        if (!database.isAdmin(adminUserId)) {
+            database.clearSession(adminUserId);
+            sendMessage(chatId, "⛔️ Недостаточно прав.", backToMenuKeyboard());
+            return;
+        }
+
+        if (!message.hasText()) {
+            sendMessage(chatId, "Пришлите число, например <code>25</code>.", keyboardWithCancel());
+            return;
+        }
+
+        String text = message.getText().trim();
+        if (!text.matches("^\\d+$")) {
+            sendMessage(chatId, "Нужно положительное число. Например: <code>25</code>", keyboardWithCancel());
+            return;
+        }
+
+        int limit = Integer.parseInt(text);
+        if (limit < 1 || limit > 1000) {
+            sendMessage(chatId,
+                    "Допустимый диапазон: от <b>1</b> до <b>1000</b>. Попробуйте еще раз.",
+                    keyboardWithCancel());
+            return;
+        }
+
+        database.setDefaultDailyLimit(limit);
+        database.clearSession(adminUserId);
+        sendMessage(chatId,
+                "✅ Новый дневной лимит (МСК) установлен: <b>" + limit + "</b>",
+                adminBackKeyboard());
+    }
+
+    private void processGenerationAsync(long chatId, long userId, String prompt, String photoFileId) {
+        sendMessage(chatId,
+                "⏳ Запускаю генерацию. Обычно это занимает немного времени, отправлю результат сразу как будет готов.",
+                null);
+
+        generationPool.submit(() -> {
+            try {
+                sendTyping(chatId, ActionType.UPLOADPHOTO);
+
+                byte[] photoBytes = null;
+                String mimeType = "image/jpeg";
+                if (photoFileId != null && !photoFileId.isBlank()) {
+                    photoBytes = downloadTelegramPhoto(photoFileId);
+                }
+
+                byte[] result = kieAiClient.generateImage(prompt, photoBytes, mimeType);
+                sendImage(chatId, result,
+                        "✅ Готово!\n\n"
+                                + "Если хотите, можно сразу сделать еще вариант с новым промптом 👇");
+                sendMainMenu(chatId, userId, "Выберите следующий режим:");
+            } catch (Exception e) {
+                log.error("Ошибка генерации для user {}", userId, e);
+                sendMessage(chatId,
+                        "⚠️ Не удалось завершить генерацию: <code>" + safe(e.getMessage()) + "</code>\n"
+                                + "Попробуйте еще раз через меню.",
+                        backToMenuKeyboard());
+            }
+        });
+    }
+
+    private byte[] downloadTelegramPhoto(String fileId) throws TelegramApiException {
+        GetFile getFile = new GetFile();
+        getFile.setFileId(fileId);
+
+        org.telegram.telegrambots.meta.api.objects.File tgFile = execute(getFile);
+        String path = tgFile.getFilePath();
+        String url = "https://api.telegram.org/file/bot" + config.getBotToken() + "/" + path;
+
+        try {
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create(url))
+                    .GET()
+                    .timeout(Duration.ofSeconds(40))
+                    .build();
+            HttpResponse<byte[]> response = httpClient.send(request, HttpResponse.BodyHandlers.ofByteArray());
+            if (response.statusCode() < 200 || response.statusCode() >= 300) {
+                throw new IllegalStateException("Не удалось скачать фото из Telegram. HTTP " + response.statusCode());
+            }
+            return response.body();
+        } catch (Exception e) {
+            throw new IllegalStateException("Ошибка загрузки фото из Telegram: " + e.getMessage(), e);
+        }
+    }
+
+    private boolean ensureSubscribed(long userId, long chatId) {
+        if (isSubscribed(userId)) {
+            return true;
+        }
+        sendSubscriptionGate(chatId,
+                "📢 Для использования бота нужна активная подписка на канал."
+                        + " После подписки нажмите кнопку <b>Я подписался</b>.");
+        return false;
+    }
+
+    private boolean isSubscribed(long userId) {
+        try {
+            GetChatMember getChatMember = new GetChatMember();
+            getChatMember.setChatId(config.getRequiredChannelId());
+            getChatMember.setUserId(userId);
+
+            ChatMember member = execute(getChatMember);
+            if (member == null || member.getStatus() == null) {
+                return false;
+            }
+            String status = member.getStatus();
+            return "member".equals(status)
+                    || "administrator".equals(status)
+                    || "creator".equals(status);
+        } catch (TelegramApiException e) {
+            log.warn("Проверка подписки не удалась для user {}: {}", userId, e.getMessage());
+            return false;
+        }
+    }
+
+    private void sendSubscriptionGate(long chatId, String text) {
+        List<List<InlineKeyboardButton>> rows = new ArrayList<>();
+        rows.add(singleButtonRow(urlButton("📢 Подписаться на канал", config.getRequiredChannelUrl())));
+        rows.add(singleButtonRow(callbackButton("✅ Я подписался", CB_CHECK_SUB)));
+
+        InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
+        markup.setKeyboard(rows);
+
+        sendMessage(chatId, text, markup);
+    }
+
+    private void sendUsersList(long chatId) {
+        List<UserSummary> users = database.listUsersWithTodayUsage();
+        int defaultLimit = database.getDefaultDailyLimit();
+
+        if (users.isEmpty()) {
+            sendMessage(chatId, "Пользователей пока нет в базе.", adminBackKeyboard());
+            return;
+        }
+
+        String header = "👥 <b>Список пользователей</b>\n"
+                + "Лимит по умолчанию: <b>" + defaultLimit + "</b>/день (МСК)\n\n";
+        List<String> chunks = new ArrayList<>();
+        StringBuilder current = new StringBuilder(header);
+        for (UserSummary u : users) {
+            int effectiveLimit = u.personalDailyLimit() != null ? u.personalDailyLimit() : defaultLimit;
+            StringBuilder entry = new StringBuilder();
+            entry.append("• <code>").append(u.userId()).append("</code>");
+            if (u.username() != null && !u.username().isBlank()) {
+                entry.append(" @").append(u.username());
+            }
+            if (u.firstName() != null && !u.firstName().isBlank()) {
+                entry.append(" (" + safe(u.firstName()) + ")");
+            }
+            entry.append("\n");
+            entry.append("  🔐 ").append(u.admin() ? "админ" : "пользователь").append("\n");
+            entry.append("  📈 сегодня: ").append(u.usedToday()).append("/").append(effectiveLimit).append("\n\n");
+
+            if (current.length() + entry.length() > 3500) {
+                chunks.add(current.toString());
+                current = new StringBuilder();
+            }
+            current.append(entry);
+        }
+
+        if (!current.isEmpty()) {
+            chunks.add(current.toString());
+        }
+
+        for (String chunk : chunks) {
+            sendMessage(chatId, chunk, null);
+        }
+        sendMessage(chatId, "Панель администратора:", adminBackKeyboard());
+    }
+
+    private void sendDailyLimitReached(long chatId, long userId) {
+        int used = database.getTodayUsage(userId);
+        int limit = database.getEffectiveDailyLimit(userId);
+        sendMessage(chatId,
+                "🚫 <b>Лимит генераций на сегодня исчерпан</b>\n\n"
+                        + "По Москве: <b>" + used + " / " + limit + "</b>\n"
+                        + "Следующий сброс произойдет в 00:00 (МСК).",
+                backToMenuKeyboard());
+    }
+
+    private void sendMainMenu(long chatId, long userId, String text) {
+        boolean admin = database.isAdmin(userId);
+
+        List<List<InlineKeyboardButton>> rows = new ArrayList<>();
+        rows.add(singleButtonRow(callbackButton("🖼️ Трансферный рисунок", CB_MENU_TRANSFER)));
+        rows.add(singleButtonRow(callbackButton("🎨 Эскиз", CB_MENU_SKETCH)));
+        rows.add(singleButtonRow(callbackButton("🧠 Свободная генерация", CB_MENU_FREE)));
+        if (admin) {
+            rows.add(singleButtonRow(callbackButton("🛠️ Админ-панель", CB_MENU_ADMIN)));
+        }
+
+        int used = database.getTodayUsage(userId);
+        int limit = database.getEffectiveDailyLimit(userId);
+
+        InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
+        markup.setKeyboard(rows);
+
+        sendMessage(chatId,
+                text + "\n\n"
+                        + "📊 Сегодня (МСК): <b>" + used + " / " + limit + "</b>",
+                markup);
+    }
+
+    private void sendAdminPanel(long chatId) {
+        List<List<InlineKeyboardButton>> rows = new ArrayList<>();
+        rows.add(singleButtonRow(callbackButton("👥 Список пользователей", CB_ADMIN_USERS)));
+        rows.add(singleButtonRow(callbackButton("➕ Добавить админа", CB_ADMIN_ADD)));
+        rows.add(singleButtonRow(callbackButton("📊 Лимит генераций в день (МСК)", CB_ADMIN_LIMIT)));
+        rows.add(singleButtonRow(callbackButton("⬅️ Назад в меню", CB_BACK_MENU)));
+
+        InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
+        markup.setKeyboard(rows);
+
+        sendMessage(chatId,
+                "🛠️ <b>Админ-панель</b>\n\n"
+                        + "Выберите действие:",
+                markup);
+    }
+
+    private InlineKeyboardMarkup keyboardWithCancel() {
+        List<List<InlineKeyboardButton>> rows = new ArrayList<>();
+        rows.add(singleButtonRow(callbackButton("❌ Отмена", CB_CANCEL)));
+
+        InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
+        markup.setKeyboard(rows);
+        return markup;
+    }
+
+    private InlineKeyboardMarkup backToMenuKeyboard() {
+        List<List<InlineKeyboardButton>> rows = new ArrayList<>();
+        rows.add(singleButtonRow(callbackButton("⬅️ В главное меню", CB_BACK_MENU)));
+
+        InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
+        markup.setKeyboard(rows);
+        return markup;
+    }
+
+    private InlineKeyboardMarkup adminBackKeyboard() {
+        List<List<InlineKeyboardButton>> rows = new ArrayList<>();
+        rows.add(singleButtonRow(callbackButton("⬅️ В админ-панель", CB_MENU_ADMIN)));
+
+        InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
+        markup.setKeyboard(rows);
+        return markup;
+    }
+
+    private InlineKeyboardButton callbackButton(String text, String data) {
+        InlineKeyboardButton button = new InlineKeyboardButton();
+        button.setText(text);
+        button.setCallbackData(data);
+        return button;
+    }
+
+    private InlineKeyboardButton urlButton(String text, String url) {
+        InlineKeyboardButton button = new InlineKeyboardButton();
+        button.setText(text);
+        button.setUrl(url);
+        return button;
+    }
+
+    private List<InlineKeyboardButton> singleButtonRow(InlineKeyboardButton button) {
+        List<InlineKeyboardButton> row = new ArrayList<>();
+        row.add(button);
+        return row;
+    }
+
+    private void sendMessage(long chatId, String htmlText, InlineKeyboardMarkup markup) {
+        SendMessage message = new SendMessage();
+        message.setChatId(String.valueOf(chatId));
+        message.setText(htmlText);
+        message.setParseMode("HTML");
+        message.setDisableWebPagePreview(true);
+        if (markup != null) {
+            message.setReplyMarkup(markup);
+        }
+
+        try {
+            execute(message);
+        } catch (TelegramApiException e) {
+            log.error("Не удалось отправить сообщение", e);
+        }
+    }
+
+    private void sendImage(long chatId, byte[] bytes, String caption) {
+        SendPhoto sendPhoto = new SendPhoto();
+        sendPhoto.setChatId(String.valueOf(chatId));
+        sendPhoto.setCaption(caption);
+        sendPhoto.setParseMode("HTML");
+        sendPhoto.setPhoto(new InputFile(new java.io.ByteArrayInputStream(bytes), "result.png"));
+
+        try {
+            execute(sendPhoto);
+        } catch (TelegramApiException e) {
+            log.error("Не удалось отправить фото", e);
+        }
+    }
+
+    private void sendTyping(long chatId, ActionType action) {
+        SendChatAction chatAction = new SendChatAction();
+        chatAction.setChatId(String.valueOf(chatId));
+        chatAction.setAction(action);
+        try {
+            execute(chatAction);
+        } catch (TelegramApiException e) {
+            log.debug("Не удалось отправить chat action: {}", e.getMessage());
+        }
+    }
+
+    private void answerCallback(String callbackId) {
+        try {
+            AnswerCallbackQuery answer = new AnswerCallbackQuery();
+            answer.setCallbackQueryId(callbackId);
+            execute(answer);
+        } catch (TelegramApiException e) {
+            log.debug("Не удалось ответить на callback: {}", e.getMessage());
+        }
+    }
+
+    private static PhotoSize getLargestPhoto(List<PhotoSize> photos) {
+        return photos.stream()
+                .max(Comparator.comparing(PhotoSize::getFileSize, Comparator.nullsFirst(Integer::compareTo)))
+                .orElse(photos.get(photos.size() - 1));
+    }
+
+    private static String safe(String raw) {
+        if (raw == null) {
+            return "";
+        }
+        return raw
+                .replace("&", "&amp;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;")
+                .replace("\"", "&quot;")
+                .replace("'", "&#39;")
+                .replace("\n", " ")
+                .trim();
+    }
+}
