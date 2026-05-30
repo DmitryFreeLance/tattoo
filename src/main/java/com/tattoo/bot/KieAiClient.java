@@ -23,6 +23,11 @@ public class KieAiClient {
     private static final Logger log = LoggerFactory.getLogger(KieAiClient.class);
     private static final Pattern URL_PATTERN = Pattern.compile("https?://[^\\s)\"]+");
 
+    private static final String MODEL_GPT_IMAGE_TEXT = "gpt-image-2-text-to-image";
+    private static final String MODEL_GPT_IMAGE_IMAGE = "gpt-image-2-image-to-image";
+    private static final String MODEL_NANO_BANANA_TEXT = "google/nano-banana";
+    private static final String MODEL_NANO_BANANA_EDIT = "google/nano-banana-edit";
+
     private final AppConfig config;
     private final ObjectMapper objectMapper;
     private final HttpClient httpClient;
@@ -37,149 +42,80 @@ public class KieAiClient {
 
     public byte[] generateImage(String prompt, byte[] sourceImageBytes, String sourceMimeType) {
         try {
-            byte[] geminiImage = tryGemini(prompt, sourceImageBytes, sourceMimeType);
-            if (geminiImage != null && geminiImage.length > 0) {
-                return geminiImage;
-            }
-            throw new IllegalStateException("Gemini вернул пустой результат");
-        } catch (Exception e) {
-            log.warn("Gemini не вернул изображение, переключаюсь на GPT Image 2: {}", e.getMessage());
             return runGptImageTask(prompt, sourceImageBytes, sourceMimeType);
-        }
-    }
-
-    private byte[] tryGemini(String prompt, byte[] sourceImageBytes, String sourceMimeType) {
-        try {
-            String uploadedUrl = null;
-            if (sourceImageBytes != null && sourceImageBytes.length > 0) {
-                uploadedUrl = uploadImage(sourceImageBytes, sourceMimeType);
-            }
-
-            JsonNode payload = buildGeminiPayload(prompt, uploadedUrl);
-            HttpRequest request = HttpRequest.newBuilder()
-                    .uri(URI.create(config.getKieGeminiEndpoint()))
-                    .header("Authorization", "Bearer " + config.getKieApiKey())
-                    .header("Content-Type", "application/json")
-                    .POST(HttpRequest.BodyPublishers.ofString(payload.toString()))
-                    .timeout(Duration.ofSeconds(60))
-                    .build();
-
-            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-            if (response.statusCode() < 200 || response.statusCode() >= 300) {
-                throw new IllegalStateException("HTTP " + response.statusCode() + ": " + response.body());
-            }
-
-            JsonNode json = objectMapper.readTree(response.body());
-            String imageUrl = extractImageUrlFromGemini(json);
-            if (imageUrl == null || imageUrl.isBlank()) {
-                throw new IllegalStateException("Gemini 3 Flash не вернул image URL");
-            }
-            return downloadBytes(imageUrl);
-        } catch (Exception e) {
-            throw new IllegalStateException("Ошибка Gemini: " + e.getMessage(), e);
-        }
-    }
-
-    private JsonNode buildGeminiPayload(String prompt, String uploadedUrl) {
-        JsonNode root = objectMapper.createObjectNode();
-        ((com.fasterxml.jackson.databind.node.ObjectNode) root).put("model", "gemini-3-flash");
-        ((com.fasterxml.jackson.databind.node.ObjectNode) root).put("stream", false);
-        ((com.fasterxml.jackson.databind.node.ObjectNode) root).put("temperature", 0.2);
-
-        var messages = objectMapper.createArrayNode();
-        var userMessage = objectMapper.createObjectNode();
-        userMessage.put("role", "user");
-
-        var content = objectMapper.createArrayNode();
-        var textPart = objectMapper.createObjectNode();
-        textPart.put("type", "text");
-        textPart.put("text", prompt);
-        content.add(textPart);
-
-        if (uploadedUrl != null && !uploadedUrl.isBlank()) {
-            var imagePart = objectMapper.createObjectNode();
-            imagePart.put("type", "image_url");
-            var imageNode = objectMapper.createObjectNode();
-            imageNode.put("url", uploadedUrl);
-            imagePart.set("image_url", imageNode);
-            content.add(imagePart);
-        }
-
-        userMessage.set("content", content);
-        messages.add(userMessage);
-        ((com.fasterxml.jackson.databind.node.ObjectNode) root).set("messages", messages);
-        return root;
-    }
-
-    private String extractImageUrlFromGemini(JsonNode json) {
-        if (json == null) {
-            return null;
-        }
-
-        JsonNode choices = json.path("choices");
-        if (choices.isArray() && !choices.isEmpty()) {
-            JsonNode first = choices.get(0);
-            JsonNode message = first.path("message");
-            JsonNode content = message.get("content");
-
-            if (content != null) {
-                if (content.isTextual()) {
-                    String text = content.asText();
-                    String maybeUrl = extractFirstUrl(text);
-                    if (looksLikeImageUrl(maybeUrl)) {
-                        return maybeUrl;
-                    }
-                }
-
-                if (content.isArray()) {
-                    for (JsonNode part : content) {
-                        if (part.has("image_url")) {
-                            JsonNode imageUrlNode = part.path("image_url").path("url");
-                            if (!imageUrlNode.asText().isBlank()) {
-                                return imageUrlNode.asText();
-                            }
-                        }
-                        if (part.has("url") && looksLikeImageUrl(part.path("url").asText())) {
-                            return part.path("url").asText();
-                        }
-                    }
-                }
+        } catch (Exception gptError) {
+            log.warn("GPT Image 2 вернул ошибку, переключаюсь на Nano Banana: {}", gptError.getMessage());
+            try {
+                return runNanoBananaTask(prompt, sourceImageBytes, sourceMimeType);
+            } catch (Exception nanoError) {
+                throw new IllegalStateException(
+                        "Не удалось сгенерировать изображение. GPT Image: " + safeError(gptError)
+                                + " | Nano Banana: " + safeError(nanoError),
+                        nanoError
+                );
             }
         }
-        return null;
     }
 
     private byte[] runGptImageTask(String prompt, byte[] sourceImageBytes, String sourceMimeType) {
         try {
-            String imageUrl = null;
+            String model;
+            var input = objectMapper.createObjectNode();
+            input.put("prompt", prompt);
+            input.put("aspect_ratio", "auto");
+
             if (sourceImageBytes != null && sourceImageBytes.length > 0) {
-                imageUrl = uploadImage(sourceImageBytes, sourceMimeType);
+                String imageUrl = uploadImage(sourceImageBytes, sourceMimeType);
+                var urls = objectMapper.createArrayNode();
+                urls.add(imageUrl);
+                input.set("input_urls", urls);
+                model = MODEL_GPT_IMAGE_IMAGE;
+            } else {
+                model = MODEL_GPT_IMAGE_TEXT;
             }
 
-            String taskId = createTask(prompt, imageUrl);
-            String resultUrl = pollTaskResultUrl(taskId);
-            if (resultUrl == null) {
-                throw new IllegalStateException("Не удалось получить URL сгенерированного изображения");
-            }
-            return downloadBytes(resultUrl);
+            return executeTaskAndDownload(model, input);
         } catch (Exception e) {
-            throw new IllegalStateException("Ошибка GPT Image fallback: " + e.getMessage(), e);
+            throw new IllegalStateException("Ошибка GPT Image 2: " + e.getMessage(), e);
         }
     }
 
-    private String createTask(String prompt, String imageUrl) throws IOException, InterruptedException {
-        String model = imageUrl == null ? "gpt-image-2-text-to-image" : "gpt-image-2-image-to-image";
+    private byte[] runNanoBananaTask(String prompt, byte[] sourceImageBytes, String sourceMimeType) {
+        try {
+            String model;
+            var input = objectMapper.createObjectNode();
+            input.put("prompt", prompt);
+            input.put("output_format", "png");
+            input.put("aspect_ratio", "auto");
 
+            if (sourceImageBytes != null && sourceImageBytes.length > 0) {
+                String imageUrl = uploadImage(sourceImageBytes, sourceMimeType);
+                var urls = objectMapper.createArrayNode();
+                urls.add(imageUrl);
+                input.set("image_urls", urls);
+                model = MODEL_NANO_BANANA_EDIT;
+            } else {
+                model = MODEL_NANO_BANANA_TEXT;
+            }
+
+            return executeTaskAndDownload(model, input);
+        } catch (Exception e) {
+            throw new IllegalStateException("Ошибка Nano Banana: " + e.getMessage(), e);
+        }
+    }
+
+    private byte[] executeTaskAndDownload(String model, JsonNode input) throws IOException, InterruptedException {
+        String taskId = createTask(model, input);
+        String resultUrl = pollTaskResultUrl(taskId);
+        if (resultUrl == null || resultUrl.isBlank()) {
+            throw new IllegalStateException("Не удалось получить URL результата");
+        }
+        return downloadBytes(resultUrl);
+    }
+
+    private String createTask(String model, JsonNode input) throws IOException, InterruptedException {
         var root = objectMapper.createObjectNode();
         root.put("model", model);
-        var input = objectMapper.createObjectNode();
-        input.put("prompt", prompt);
-        input.put("aspect_ratio", "auto");
-        if (imageUrl != null) {
-            var arr = objectMapper.createArrayNode();
-            arr.add(imageUrl);
-            input.set("input_urls", arr);
-        }
         root.set("input", input);
 
         HttpRequest request = HttpRequest.newBuilder()
@@ -348,16 +284,10 @@ public class KieAiClient {
         return null;
     }
 
-    private static boolean looksLikeImageUrl(String url) {
-        if (url == null || url.isBlank()) {
-            return false;
+    private static String safeError(Exception exception) {
+        if (exception == null || exception.getMessage() == null) {
+            return "unknown";
         }
-        String lower = url.toLowerCase();
-        return lower.contains(".png")
-                || lower.contains(".jpg")
-                || lower.contains(".jpeg")
-                || lower.contains(".webp")
-                || lower.contains("download")
-                || lower.contains("image");
+        return exception.getMessage().replace("\n", " ").trim();
     }
 }

@@ -8,7 +8,7 @@
 - Проверка подписки на канал
 - Админ-панель
 - Лимиты генераций в день (по Москве)
-- Интеграция с `kie.ai` (Gemini 3 Flash + fallback на GPT Image 2)
+- Интеграция с `kie.ai` (`GPT Image 2` + fallback на `Nano Banana`)
 
 ## Функции
 
@@ -60,11 +60,9 @@ docker run --env-file .env -v $(pwd)/data:/app/data tattoo-bot
 
 ## Как работает интеграция KIE
 
-1. Сначала запрос идет в `Gemini 3 Flash` (`/gemini-3-flash/v1/chat/completions`).
-2. Если есть ошибка или не пришел валидный image-результат, бот автоматически переключается на:
+1. По умолчанию бот использует `GPT Image 2`:
    - `gpt-image-2-image-to-image` (если есть фото)
    - `gpt-image-2-text-to-image` (если только промпт)
-
-## Важно про Gemini 3 Flash
-По документации KIE для `Gemini 3 Flash (openai)` endpoint — это чат/completions-интерфейс (текстовый ответ, мультимодальный ввод).
-На практике для надежной выдачи картинки в этом боте включен fallback на GPT Image 2.
+2. Если `GPT Image 2` вернул ошибку, бот автоматически переключается на `Nano Banana`:
+   - `google/nano-banana-edit` (если есть фото)
+   - `google/nano-banana` (если только промпт)

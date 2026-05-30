@@ -13,7 +13,6 @@ public class AppConfig {
     private final Long initialAdminId;
     private final int pollAttempts;
     private final long pollDelayMillis;
-    private final String kieGeminiEndpoint;
     private final String kieCreateTaskEndpoint;
     private final String kieRecordInfoEndpoint;
     private final String kieFileUploadEndpoint;
@@ -29,7 +28,6 @@ public class AppConfig {
             Long initialAdminId,
             int pollAttempts,
             long pollDelayMillis,
-            String kieGeminiEndpoint,
             String kieCreateTaskEndpoint,
             String kieRecordInfoEndpoint,
             String kieFileUploadEndpoint
@@ -44,7 +42,6 @@ public class AppConfig {
         this.initialAdminId = initialAdminId;
         this.pollAttempts = pollAttempts;
         this.pollDelayMillis = pollDelayMillis;
-        this.kieGeminiEndpoint = kieGeminiEndpoint;
         this.kieCreateTaskEndpoint = kieCreateTaskEndpoint;
         this.kieRecordInfoEndpoint = kieRecordInfoEndpoint;
         this.kieFileUploadEndpoint = kieFileUploadEndpoint;
@@ -71,9 +68,6 @@ public class AppConfig {
         int pollAttempts = intEnv(env, "KIE_POLL_ATTEMPTS", 40);
         long pollDelayMillis = longEnv(env, "KIE_POLL_DELAY_MS", 1_800L);
 
-        String kieGeminiEndpoint = envOrDefault(env,
-                "KIE_GEMINI_ENDPOINT",
-                "https://api.kie.ai/gemini-3-flash/v1/chat/completions");
         String kieCreateTaskEndpoint = envOrDefault(env,
                 "KIE_CREATE_TASK_ENDPOINT",
                 "https://api.kie.ai/api/v1/jobs/createTask");
@@ -105,7 +99,6 @@ public class AppConfig {
                 initialAdminId,
                 Math.max(pollAttempts, 10),
                 Math.max(pollDelayMillis, 500L),
-                kieGeminiEndpoint,
                 kieCreateTaskEndpoint,
                 kieRecordInfoEndpoint,
                 kieFileUploadEndpoint
@@ -205,10 +198,6 @@ public class AppConfig {
 
     public long getPollDelayMillis() {
         return pollDelayMillis;
-    }
-
-    public String getKieGeminiEndpoint() {
-        return kieGeminiEndpoint;
     }
 
     public String getKieCreateTaskEndpoint() {

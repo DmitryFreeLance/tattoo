@@ -55,6 +55,12 @@ public class TattooBot extends TelegramLongPollingBot {
 
     private static final String PROMPT_TRANSFER = "Обработка изображения так, чтобы сделать из этого рисунка контурный линейный рисунок с обозначениями теней пунктиром контуров линиями разной толщины.";
     private static final String PROMPT_SKETCH = "Сделай из исходного фото чистый художественный тату-эскиз: выразительные контуры, логичные тени, аккуратная композиция для переноса на кожу, без лишнего фона и визуального мусора.";
+    private static final String WELCOME_TEXT = "👋 <b>Добро пожаловать в Tattoo Assistant</b>\n\n"
+            + "Я помогу быстро подготовить:\n"
+            + "• 🖼️ трансферный рисунок\n"
+            + "• 🎨 тату-эскиз\n"
+            + "• 🧠 свободную генерацию по вашему промпту\n\n"
+            + "Выберите режим ниже 👇";
 
     private final AppConfig config;
     private final Database database;
@@ -113,7 +119,7 @@ public class TattooBot extends TelegramLongPollingBot {
         if (CB_CHECK_SUB.equals(data)) {
             if (isSubscribed(userId)) {
                 database.clearSession(userId);
-                sendMainMenu(chatId, userId, "✅ Подписка подтверждена! Добро пожаловать в меню.");
+                sendMainMenu(chatId, userId, WELCOME_TEXT);
             } else {
                 sendSubscriptionGate(chatId, "Пока не вижу подписку. Подпишитесь на канал и нажмите кнопку еще раз 👇");
             }
@@ -220,13 +226,7 @@ public class TattooBot extends TelegramLongPollingBot {
                 return;
             }
             database.clearSession(userId);
-            sendMainMenu(chatId, userId,
-                    "👋 <b>Добро пожаловать в Tattoo Assistant</b>\n\n"
-                            + "Я помогу быстро подготовить:\n"
-                            + "• 🖼️ трансферный рисунок\n"
-                            + "• 🎨 тату-эскиз\n"
-                            + "• 🧠 свободную генерацию по вашему промпту\n\n"
-                            + "Выберите режим ниже 👇");
+            sendMainMenu(chatId, userId, WELCOME_TEXT);
             return;
         }
 
