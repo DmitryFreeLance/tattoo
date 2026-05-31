@@ -10,8 +10,8 @@ public enum PaymentProduct {
     ADD_WEEK_10("add_w10", "Увеличение лимита +10 генераций в день до конца недельной подписки", 300, Kind.DAILY_BOOST, SubscriptionPlan.WEEKLY, 10, 0),
     ADD_MONTH_5("add_m5", "Увеличение лимита +5 генераций в день до конца месячной подписки", 640, Kind.DAILY_BOOST, SubscriptionPlan.MONTHLY, 5, 0),
     ADD_MONTH_10("add_m10", "Увеличение лимита +10 генераций в день до конца месячной подписки", 1290, Kind.DAILY_BOOST, SubscriptionPlan.MONTHLY, 10, 0),
-    PACK_10("pack_10", "Разовый пакет: 10 дополнительных генераций (не сгорают)", 39, Kind.ONE_TIME_PACK, null, 0, 10),
-    PACK_20("pack_20", "Разовый пакет: 20 дополнительных генераций (не сгорают)", 99, Kind.ONE_TIME_PACK, null, 0, 20);
+    PACK_10("pack_10", "Разовый пакет: 10 дополнительных генераций (не сгорают)", 69, Kind.ONE_TIME_PACK, null, 0, 10),
+    PACK_20("pack_20", "Разовый пакет: 20 дополнительных генераций (не сгорают)", 149, Kind.ONE_TIME_PACK, null, 0, 20);
 
     public enum Kind {
         SUBSCRIPTION,

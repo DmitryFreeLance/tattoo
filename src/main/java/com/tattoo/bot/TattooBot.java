@@ -6,14 +6,11 @@ import org.telegram.telegrambots.bots.TelegramLongPollingBot;
 import org.telegram.telegrambots.meta.api.methods.ActionType;
 import org.telegram.telegrambots.meta.api.methods.AnswerCallbackQuery;
 import org.telegram.telegrambots.meta.api.methods.GetFile;
-import org.telegram.telegrambots.meta.api.methods.groupadministration.CreateChatInviteLink;
-import org.telegram.telegrambots.meta.api.methods.groupadministration.ExportChatInviteLink;
 import org.telegram.telegrambots.meta.api.methods.groupadministration.GetChatMember;
 import org.telegram.telegrambots.meta.api.methods.send.SendChatAction;
 import org.telegram.telegrambots.meta.api.methods.send.SendMessage;
 import org.telegram.telegrambots.meta.api.methods.send.SendPhoto;
 import org.telegram.telegrambots.meta.api.objects.CallbackQuery;
-import org.telegram.telegrambots.meta.api.objects.ChatInviteLink;
 import org.telegram.telegrambots.meta.api.objects.InputFile;
 import org.telegram.telegrambots.meta.api.objects.Message;
 import org.telegram.telegrambots.meta.api.objects.PhotoSize;
@@ -75,10 +72,9 @@ public class TattooBot extends TelegramLongPollingBot {
     private static final String CB_BACK_MENU = "back_menu";
     private static final String CB_CANCEL = "cancel";
 
-    private static final String PROMPT_TRANSFER = "Обработка изображения так, чтобы сделать из этого рисунка контурный линейный рисунок с обозначениями теней пунктиром и линиями разной толщины.";
-    private static final String CONTRAST_BLACK_INSTRUCTION =
-            "Сделай результат более контрастным: более насыщенный черный, глубокие темные зоны, четкие черные контуры. " +
-                    "Сохраняй читаемость деталей, без серой \"мутности\".";
+    private static final String PROMPT_TRANSFER = "Обработай изображения так, чтобы сделать из этого рисунка контурный линейный рисунок с обозначениями теней пунктиром контуров линиями разной толщины";
+    private static final String REQUIRED_CHANNEL_JOIN_URL =
+            "https://t.me/fanpayonlinebot?startapp=chan_0c67e3e8-5354-4d7a-9527-9859be0301cf";
 
     private static final String WELCOME_TEXT = "👋 <b>Добро пожаловать в Tattoo Assistant</b>\n\n"
             + "Я помогу быстро подготовить:\n"
@@ -358,8 +354,8 @@ public class TattooBot extends TelegramLongPollingBot {
         sb.append("Выберите пакет ниже:");
 
         List<List<InlineKeyboardButton>> rows = new ArrayList<>();
-        rows.add(singleButtonRow(callbackButton("🎟️ Разовый пакет 10 генераций — 39 ₽", CB_BUY_SELECT_PREFIX + PaymentProduct.PACK_10.code())));
-        rows.add(singleButtonRow(callbackButton("🎟️ Разовый пакет 20 генераций — 99 ₽", CB_BUY_SELECT_PREFIX + PaymentProduct.PACK_20.code())));
+        rows.add(singleButtonRow(callbackButton("🎟️ Разовый пакет 10 генераций — 69 ₽", CB_BUY_SELECT_PREFIX + PaymentProduct.PACK_10.code())));
+        rows.add(singleButtonRow(callbackButton("🎟️ Разовый пакет 20 генераций — 149 ₽", CB_BUY_SELECT_PREFIX + PaymentProduct.PACK_20.code())));
         rows.add(singleButtonRow(callbackButton("⬅️ В главное меню", CB_BACK_MENU)));
 
         InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
@@ -793,7 +789,7 @@ public class TattooBot extends TelegramLongPollingBot {
 
     private void processGenerationAsync(long chatId, long userId, String prompt, String photoFileId) {
         sendMessage(chatId,
-                "⏳ Запускаю генерацию. Максимальное время ожидания ответа от ИИ: <b>120 секунд</b>.",
+                "⏳ Запускаю генерацию. Если основная модель не ответит за <b>120 секунд</b>, автоматически включу резервную.",
                 null);
 
         generationPool.submit(() -> {
@@ -806,24 +802,41 @@ public class TattooBot extends TelegramLongPollingBot {
                     photoBytes = downloadTelegramPhoto(photoFileId);
                 }
 
-                String effectivePrompt = buildModelPrompt(prompt);
-                byte[] result = kieAiClient.generateImage(effectivePrompt, photoBytes, mimeType);
+                byte[] result = kieAiClient.generateImage(prompt == null ? "" : prompt.trim(), photoBytes, mimeType);
                 sendImage(chatId, result,
                         "✅ Готово!\n\n"
                                 + "Если хотите, можно сразу сделать еще вариант с новым промптом 👇");
                 sendMainMenu(chatId, userId, withBalance("Выберите следующий режим:", userId));
             } catch (AiTimeoutException timeout) {
+                boolean refunded = refundGenerationOnFailure(userId);
                 sendMessage(chatId,
-                        "⚠️ Не удалось получить ответ от ИИ за 120 секунд. Попробуйте снова.",
+                        "⚠️ Не удалось получить ответ от обеих моделей. Попробуйте снова.\n"
+                                + (refunded
+                                ? "💸 Списанные токены автоматически возвращены на баланс."
+                                : "⚠️ Не удалось автоматически вернуть токены. Сообщите администратору."),
                         backToMenuKeyboard());
             } catch (Exception e) {
                 log.error("Ошибка генерации для user {}", userId, e);
+                boolean refunded = refundGenerationOnFailure(userId);
                 sendMessage(chatId,
                         "⚠️ Не удалось завершить генерацию: <code>" + safe(e.getMessage()) + "</code>\n"
+                                + (refunded
+                                ? "💸 Списанные токены автоматически возвращены на баланс.\n"
+                                : "⚠️ Не удалось автоматически вернуть токены. Сообщите администратору.\n")
                                 + "Попробуйте еще раз через меню.",
                         backToMenuKeyboard());
             }
         });
+    }
+
+    private boolean refundGenerationOnFailure(long userId) {
+        try {
+            database.refundGenerationTokens(userId);
+            return true;
+        } catch (Exception refundError) {
+            log.error("Не удалось вернуть токены пользователю {}", userId, refundError);
+            return false;
+        }
     }
 
     private byte[] downloadTelegramPhoto(String fileId) throws TelegramApiException {
@@ -1167,37 +1180,7 @@ public class TattooBot extends TelegramLongPollingBot {
     }
 
     private String resolveInviteLink() {
-        String chatId = config.getRequiredChannelId();
-
-        try {
-            CreateChatInviteLink createLink = new CreateChatInviteLink();
-            createLink.setChatId(chatId);
-            createLink.setName("tattoo-bot-" + System.currentTimeMillis());
-            createLink.setExpireDate((int) Instant.now().plus(Duration.ofDays(7)).getEpochSecond());
-
-            ChatInviteLink invite = execute(createLink);
-            if (invite != null && invite.getInviteLink() != null && !invite.getInviteLink().isBlank()) {
-                return invite.getInviteLink();
-            }
-        } catch (TelegramApiException e) {
-            log.warn("Не удалось создать новую invite-ссылку: {}", e.getMessage());
-        }
-
-        try {
-            ExportChatInviteLink export = new ExportChatInviteLink();
-            export.setChatId(chatId);
-            String invite = execute(export);
-            if (invite != null && !invite.isBlank()) {
-                return invite;
-            }
-        } catch (TelegramApiException e) {
-            log.warn("Не удалось получить primary invite-ссылку: {}", e.getMessage());
-        }
-
-        if (config.getRequiredChannelUrl() != null && !config.getRequiredChannelUrl().isBlank()) {
-            return config.getRequiredChannelUrl();
-        }
-        return null;
+        return REQUIRED_CHANNEL_JOIN_URL;
     }
 
     private Long resolveUserIdFromText(String text) {
@@ -1239,14 +1222,6 @@ public class TattooBot extends TelegramLongPollingBot {
 
     private String buildWelcomeWithBalance(long userId) {
         return withBalance(WELCOME_TEXT, userId);
-    }
-
-    private String buildModelPrompt(String basePrompt) {
-        String prompt = basePrompt == null ? "" : basePrompt.trim();
-        if (prompt.isEmpty()) {
-            prompt = "Подготовь изображение для тату-работы.";
-        }
-        return prompt + "\n\n" + CONTRAST_BLACK_INSTRUCTION;
     }
 
     private String withBalance(String text, long userId) {

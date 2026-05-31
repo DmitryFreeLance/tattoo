@@ -23,6 +23,8 @@ public class KieAiClient {
     private static final Logger log = LoggerFactory.getLogger(KieAiClient.class);
     private static final Pattern URL_PATTERN = Pattern.compile("https?://[^\\s)\"]+");
 
+    private static final String MODEL_GPT_IMAGE_2 = "gpt-image-2";
+    private static final String MODEL_GPT_IMAGE_2_IMAGE_TO_IMAGE = "gpt-image-2-image-to-image";
     private static final String MODEL_NANO_BANANA = "google/nano-banana";
     private static final long MAX_WAIT_MILLIS = 120_000L;
 
@@ -39,17 +41,22 @@ public class KieAiClient {
     }
 
     public byte[] generateImage(String prompt, byte[] sourceImageBytes, String sourceMimeType) {
+        boolean hasSourceImage = sourceImageBytes != null && sourceImageBytes.length > 0;
+        String primaryModel = hasSourceImage ? MODEL_GPT_IMAGE_2_IMAGE_TO_IMAGE : MODEL_GPT_IMAGE_2;
+
         try {
-            String taskId = createNanoBananaTask(prompt, sourceImageBytes, sourceMimeType);
-            String resultUrl = pollTaskResultUrl(taskId, MAX_WAIT_MILLIS);
-            if (resultUrl == null || resultUrl.isBlank()) {
-                throw new IllegalStateException("Не удалось получить URL результата");
+            return generateImageWithModel(primaryModel, prompt, sourceImageBytes, sourceMimeType);
+        } catch (AiTimeoutException primaryTimeout) {
+            log.warn("Primary model {} timed out after 120s. Switching to fallback {}.", primaryModel, MODEL_NANO_BANANA);
+            try {
+                return generateImageWithModel(MODEL_NANO_BANANA, prompt, sourceImageBytes, sourceMimeType);
+            } catch (AiTimeoutException fallbackTimeout) {
+                throw new AiTimeoutException("Обе модели не ответили за 120 секунд (основная и fallback).");
+            } catch (Exception fallbackError) {
+                throw new IllegalStateException("Ошибка fallback Nano Banana: " + fallbackError.getMessage(), fallbackError);
             }
-            return downloadBytes(resultUrl);
-        } catch (AiTimeoutException timeout) {
-            throw timeout;
-        } catch (Exception e) {
-            throw new IllegalStateException("Ошибка Nano Banana: " + e.getMessage(), e);
+        } catch (Exception primaryError) {
+            throw new IllegalStateException("Ошибка GPT Image 2: " + primaryError.getMessage(), primaryError);
         }
     }
 
@@ -83,15 +90,30 @@ public class KieAiClient {
         }
     }
 
-    private String createNanoBananaTask(String prompt, byte[] sourceImageBytes, String sourceMimeType)
+    private byte[] generateImageWithModel(String model, String prompt, byte[] sourceImageBytes, String sourceMimeType)
+            throws IOException, InterruptedException {
+        String taskId = createTask(model, prompt, sourceImageBytes, sourceMimeType);
+        String resultUrl = pollTaskResultUrl(taskId, MAX_WAIT_MILLIS);
+        if (resultUrl == null || resultUrl.isBlank()) {
+            throw new IllegalStateException("Не удалось получить URL результата");
+        }
+        return downloadBytes(resultUrl);
+    }
+
+    private String createTask(String model, String prompt, byte[] sourceImageBytes, String sourceMimeType)
             throws IOException, InterruptedException {
         var root = objectMapper.createObjectNode();
-        root.put("model", MODEL_NANO_BANANA);
+        root.put("model", model);
 
         var input = objectMapper.createObjectNode();
-        input.put("prompt", prompt);
-        input.put("output_format", "png");
-        input.put("image_size", "1:1");
+        input.put("prompt", prompt == null ? "" : prompt.trim());
+
+        if (isGptImageModel(model)) {
+            input.put("aspect_ratio", "auto");
+        } else if (MODEL_NANO_BANANA.equals(model)) {
+            input.put("output_format", "png");
+            input.put("image_size", "1:1");
+        }
 
         if (sourceImageBytes != null && sourceImageBytes.length > 0) {
             String imageUrl = uploadImage(sourceImageBytes, sourceMimeType);
@@ -121,6 +143,10 @@ public class KieAiClient {
             throw new IllegalStateException("taskId не пришел: " + response.body());
         }
         return taskId;
+    }
+
+    private boolean isGptImageModel(String model) {
+        return MODEL_GPT_IMAGE_2.equals(model) || MODEL_GPT_IMAGE_2_IMAGE_TO_IMAGE.equals(model);
     }
 
     private String pollTaskResultUrl(String taskId, long timeoutMillis) throws InterruptedException, IOException {

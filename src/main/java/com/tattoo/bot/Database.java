@@ -25,8 +25,9 @@ public class Database {
 
     private static final String DAILY_SUBSCRIBER_TOKENS_KEY = "daily_subscriber_tokens";
 
-    private static final int DEFAULT_DAILY_SUBSCRIBER_TOKENS = 40;
-    private static final int TOKEN_COST_PER_GENERATION = 4;
+    private static final int DEFAULT_DAILY_SUBSCRIBER_TOKENS = 60;
+    private static final int LEGACY_DAILY_SUBSCRIBER_TOKENS = 40;
+    private static final int TOKEN_COST_PER_GENERATION = 6;
     private static final long DAY_SECONDS = 86_400L;
 
     private final String jdbcUrl;
@@ -144,8 +145,16 @@ public class Database {
             }
 
             upsertSetting(conn, DAILY_SUBSCRIBER_TOKENS_KEY, String.valueOf(DEFAULT_DAILY_SUBSCRIBER_TOKENS), false);
+            migrateLegacyDailyGrant(conn);
         } catch (SQLException e) {
             throw new IllegalStateException("Ошибка инициализации БД", e);
+        }
+    }
+
+    private void migrateLegacyDailyGrant(Connection conn) throws SQLException {
+        int current = getSettingInt(conn, DAILY_SUBSCRIBER_TOKENS_KEY, DEFAULT_DAILY_SUBSCRIBER_TOKENS);
+        if (current == LEGACY_DAILY_SUBSCRIBER_TOKENS) {
+            upsertSetting(conn, DAILY_SUBSCRIBER_TOKENS_KEY, String.valueOf(DEFAULT_DAILY_SUBSCRIBER_TOKENS), true);
         }
     }
 
@@ -345,6 +354,10 @@ public class Database {
         } catch (Exception e) {
             throw new IllegalStateException("Не удалось начислить баланс пользователю " + userId, e);
         }
+    }
+
+    public void refundGenerationTokens(long userId) {
+        addUserBonusTokens(userId, TOKEN_COST_PER_GENERATION);
     }
 
     public Optional<PaymentRequest> findLatestPendingPayment(long userId) {
