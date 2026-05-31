@@ -789,7 +789,7 @@ public class TattooBot extends TelegramLongPollingBot {
 
     private void processGenerationAsync(long chatId, long userId, String prompt, String photoFileId) {
         sendMessage(chatId,
-                "⏳ Запускаю генерацию. Если основная модель не ответит за <b>120 секунд</b>, автоматически включу резервную.",
+                "⏳ Запускаю генерацию...",
                 null);
 
         generationPool.submit(() -> {
@@ -939,8 +939,6 @@ public class TattooBot extends TelegramLongPollingBot {
                 entry.append(" (").append(safe(u.firstName())).append(")");
             }
             entry.append("\n");
-            entry.append("  🔐 ").append(u.admin() ? "админ" : "пользователь").append("\n");
-            entry.append("  📢 доступ: по подписке на канал (проверка при каждом входе)\n");
             entry.append("  🎁 бонус: ").append(u.bonusTokens()).append(" токенов (")
                     .append(u.bonusTokens() / Math.max(1, tokenCost)).append(" доп. ген.)\n");
             entry.append("  📈 сегодня: ").append(u.usedTodayGenerations()).append(" генераций\n");
