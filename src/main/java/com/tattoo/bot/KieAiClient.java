@@ -23,7 +23,7 @@ public class KieAiClient {
     private static final Logger log = LoggerFactory.getLogger(KieAiClient.class);
     private static final Pattern URL_PATTERN = Pattern.compile("https?://[^\\s)\"]+");
 
-    private static final String MODEL_GPT_IMAGE_2 = "gpt-image-2";
+    private static final String MODEL_GPT_IMAGE_2_TEXT_TO_IMAGE = "gpt-image-2-text-to-image";
     private static final String MODEL_GPT_IMAGE_2_IMAGE_TO_IMAGE = "gpt-image-2-image-to-image";
     private static final String MODEL_NANO_BANANA = "google/nano-banana";
     private static final long MAX_WAIT_MILLIS = 120_000L;
@@ -42,7 +42,10 @@ public class KieAiClient {
 
     public byte[] generateImage(String prompt, byte[] sourceImageBytes, String sourceMimeType) {
         boolean hasSourceImage = sourceImageBytes != null && sourceImageBytes.length > 0;
-        String primaryModel = hasSourceImage ? MODEL_GPT_IMAGE_2_IMAGE_TO_IMAGE : MODEL_GPT_IMAGE_2;
+        String primaryModel = hasSourceImage
+                ? MODEL_GPT_IMAGE_2_IMAGE_TO_IMAGE
+                : MODEL_GPT_IMAGE_2_TEXT_TO_IMAGE;
+        log.info("KIE generation started. primaryModel={}, hasSourceImage={}", primaryModel, hasSourceImage);
 
         try {
             return generateImageWithModel(primaryModel, prompt, sourceImageBytes, sourceMimeType);
@@ -119,8 +122,17 @@ public class KieAiClient {
             String imageUrl = uploadImage(sourceImageBytes, sourceMimeType);
             var urls = objectMapper.createArrayNode();
             urls.add(imageUrl);
-            input.set("image_urls", urls);
+            if (MODEL_GPT_IMAGE_2_IMAGE_TO_IMAGE.equals(model)) {
+                input.set("input_urls", urls);
+            } else {
+                input.set("image_urls", urls);
+            }
         }
+
+        log.debug("KIE createTask payload model={}, hasPrompt={}, hasImage={}",
+                model,
+                prompt != null && !prompt.isBlank(),
+                sourceImageBytes != null && sourceImageBytes.length > 0);
 
         root.set("input", input);
 
@@ -146,7 +158,7 @@ public class KieAiClient {
     }
 
     private boolean isGptImageModel(String model) {
-        return MODEL_GPT_IMAGE_2.equals(model) || MODEL_GPT_IMAGE_2_IMAGE_TO_IMAGE.equals(model);
+        return MODEL_GPT_IMAGE_2_TEXT_TO_IMAGE.equals(model) || MODEL_GPT_IMAGE_2_IMAGE_TO_IMAGE.equals(model);
     }
 
     private String pollTaskResultUrl(String taskId, long timeoutMillis) throws InterruptedException, IOException {
